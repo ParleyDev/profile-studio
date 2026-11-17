@@ -1,0 +1,3 @@
+#!/usr/bin/env sh
+# Identity guard: author/committer must be the project identity, and staged changes may not name anyone else.
+"$(git rev-parse --show-toplevel)/scripts/identity-guard.sh" pre-commit || exit 1

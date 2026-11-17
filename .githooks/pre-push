@@ -1,0 +1,3 @@
+#!/usr/bin/env sh
+# Identity guard over every commit about to be pushed.
+"$(git rev-parse --show-toplevel)/scripts/identity-guard.sh" pre-push || exit 1
