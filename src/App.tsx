@@ -1,17 +1,24 @@
-import { AlertTriangle, ChevronDown, CircleAlert, Download, FolderOpen, FolderOutput, Info, Plus, X } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
+import { ChevronDown, ChevronLeft, ChevronRight, CloudUpload, Download, FilePen, Save, Undo2, FolderOpen, FolderOutput, Info, LayoutGrid, Plus, Settings as Gear, Shapes, X } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
+import Gallery from './components/Gallery'
+import Loading, { SaveStatus } from './components/Loading'
+import Publish from './components/Publish'
+import Settings from './components/Settings'
+import Templates from './components/Templates'
+import Sidebar, { visibleItems, type Nav } from './components/Sidebar'
 import ItemEditor from './editors/ItemEditor'
-import { DEFAULT_LAYOUT, KIND_DIRS, KIND_LABELS, KINDS, layered, type Kind } from './format/kinds'
+import { DEFAULT_LAYOUT, KIND_LABELS, KINDS, layered, type Kind } from './format/kinds'
 import { validateWorkspace } from './format/validate'
 import { keyOf, newUid, readFolder, type Entry, type FolderFile, type Item } from './format/workspace'
 import { canSaveToFolder, exportZip, fromDrop, fromInput, fromZip, saveToFolder } from './lib/io'
-import { addItem, getState, replaceWorkspace, restore, select, useStudio } from './lib/store'
+import { useRules } from './lib/settings'
+import { addItem, discardDraft, getState, isNewDraft, replaceWorkspace, restore, saveDraft, select, setBusy, useStudio } from './lib/store'
 
 /** A new, empty item of a kind; effects and frames get a folder name nothing else of their kind uses. */
 function newItem(kind: Kind): Item {
   const entry: Entry = layered(kind) ? { folder: '', name: '', description: '', layers: [] } : { file: '', name: '', description: '' }
   if (layered(kind)) {
-    const taken = new Set(getState().ws.items.filter((i) => i.kind === kind).map(keyOf))
+    const taken = new Set([...getState().ws.items, ...Object.values(getState().drafts)].filter((i) => i.kind === kind).map(keyOf))
     let n = 1
     while (taken.has(`new_${kind}_${n}`)) n++
     entry.folder = `new_${kind}_${n}`
@@ -20,35 +27,103 @@ function newItem(kind: Kind): Item {
   return { uid: newUid(), kind, entry, files: {} }
 }
 
-const SAVED_LABEL = { saved: 'Saved in this browser', saving: 'Saving…', unsaved: 'Unsaved changes', off: 'Not saved: this browser blocks storage' } as const
+const typing = (t: EventTarget | null) => t instanceof HTMLElement && (t.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName))
 
 export default function App() {
-  const { ws, selected, loaded, saved } = useStudio()
+  const { ws, drafts, selected, loaded, saved, saving, saveError, busy } = useStudio()
   const [notes, setNotes] = useState<string[]>([])
-  const [busy, setBusy] = useState<string | null>(null)
   const [dragging, setDragging] = useState(false)
+  // Browsers don't reliably say when a drag ends: Esc, leaving the window, or dropping on a drop box inside the page
+  // can all skip dragleave here. While a drag is over the page dragover fires every ~50 ms, so the overlay stays only
+  // while those keep coming.
+  const dragTimer = useRef<number | undefined>(undefined)
+  const dragOver = (e: DragEvent) => {
+    if (!e.dataTransfer.types.includes('Files')) return
+    e.preventDefault()
+    setDragging(true)
+    window.clearTimeout(dragTimer.current)
+    dragTimer.current = window.setTimeout(() => setDragging(false), 250)
+  }
+  useEffect(() => {
+    const stop = () => { window.clearTimeout(dragTimer.current); setDragging(false) }
+    window.addEventListener('drop', stop, true)
+    window.addEventListener('dragend', stop, true)
+    return () => { stop(); window.removeEventListener('drop', stop, true); window.removeEventListener('dragend', stop, true) }
+  }, [])
   const [newOpen, setNewOpen] = useState(false)
+  const [nav, setNav] = useState<Nav>({ query: '', filter: 'all', collapsed: new Set() })
+  const [gallery, setGalleryRaw] = useState<Kind | null>(null)
+  /** A page over the items: Settings or Templates. */
+  const [page, setPage] = useState<'settings' | 'templates' | 'publish' | null>(null)
+  const setGallery = useCallback((k: Kind | null) => { setGalleryRaw(k); setPage(null) }, [])
+  const rules = useRules()
   const folderInput = useRef<HTMLInputElement>(null)
   const zipInput = useRef<HTMLInputElement>(null)
-  const problems = useMemo(() => validateWorkspace(ws), [ws])
-  const item = ws.items.find((i) => i.uid === selected) ?? null
-  const errors = [...problems.values()].reduce((n, l) => n + l.filter((p) => p.level === 'error').length, 0)
+  const searchRef = useRef<HTMLInputElement>(null)
+  const problems = useMemo(() => validateWorkspace(ws, rules), [ws, rules])
+  const shown = useMemo(() => visibleItems(ws.items, problems, nav), [ws.items, problems, nav])
+  const totals = useMemo(() => new Map(KINDS.map((k) => [k, ws.items.filter((i) => i.kind === k).length])), [ws.items])
+  const item = (selected && drafts[selected]) || ws.items.find((i) => i.uid === selected) || null
+  const draftList = Object.values(drafts)
+  const [draftsOpen, setDraftsOpen] = useState(false)
+  const errors = useMemo(() => [...problems.values()].reduce((n, l) => n + l.filter((p) => p.level === 'error').length, 0), [problems])
+
+  // The order ↑/↓ and the prev/next buttons walk: what the sidebar shows, open groups only.
+  const walk = useMemo(() => KINDS.filter((k) => !nav.collapsed.has(k)).flatMap((k) => shown.get(k)!), [shown, nav.collapsed])
+  const at = item ? walk.findIndex((i) => i.uid === item.uid) : -1
+  const sameKind = item ? shown.get(item.kind)! : []
+  const atKind = item ? sameKind.findIndex((i) => i.uid === item.uid) : -1
+
+  const open = useCallback((uid: string) => { select(uid); setGallery(null) }, [setGallery])
+  const create = useCallback((k: Kind) => { addItem(newItem(k)); setGallery(null) }, [setGallery])
+  const step = useCallback((by: number) => {
+    if (!walk.length) return
+    const next = walk[Math.max(0, Math.min(walk.length - 1, at < 0 ? 0 : at + by))]
+    if (next) open(next.uid)
+  }, [walk, at, open])
 
   useEffect(() => { void restore() }, [])
+  useEffect(() => {
+    if (!draftsOpen) return
+    const close = () => setDraftsOpen(false)
+    window.addEventListener('click', close)
+    return () => window.removeEventListener('click', close)
+  }, [draftsOpen])
   useEffect(() => {
     if (!newOpen) return
     const close = () => setNewOpen(false)
     window.addEventListener('click', close)
     return () => window.removeEventListener('click', close)
   }, [newOpen])
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); if (item && drafts[item.uid]) saveDraft(item.uid); return }
+      if (typing(e.target)) { if (e.key === 'Escape') (e.target as HTMLElement).blur(); return }
+      if (e.metaKey || e.ctrlKey || e.altKey) return
+      if (e.key === '/') { e.preventDefault(); searchRef.current?.focus(); searchRef.current?.select() }
+      else if (e.key === 'ArrowDown' || e.key === 'j') { e.preventDefault(); step(1) }
+      else if (e.key === 'ArrowUp' || e.key === 'k') { e.preventDefault(); step(-1) }
+      else if (e.key === 'Escape' && !gallery && item) setGallery(item.kind)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [step, gallery, item, drafts])
+  // Leaving while a save is still going would lose what it hasn't written.
+  useEffect(() => {
+    const warn = (e: BeforeUnloadEvent) => { if (saved === 'saving' || saved === 'unsaved') e.preventDefault() }
+    window.addEventListener('beforeunload', warn)
+    return () => window.removeEventListener('beforeunload', warn)
+  }, [saved])
 
-  const open = async (what: string, files: () => Promise<FolderFile[]>) => {
-    if (ws.items.length && !confirm('Replace what is open now? It stays in your downloads only if you exported it.')) return
-    setBusy(what)
+  const openFiles = async (files: () => Promise<FolderFile[]>, label = 'Reading files') => {
+    if (ws.items.length && !confirm('Replace what is open now? Export it first if you want to keep it.')) return
+    setBusy({ label, done: 0, total: 0 })
     try {
-      const { workspace, notes } = await readFolder(await files())
+      const list = await files()
+      setBusy({ label: `Reading ${list.length.toLocaleString()} files`, done: 0, total: 0 })
+      const { workspace, notes } = await readFolder(list)
       if (!workspace.items.length) notes.unshift('Nothing found. Pick the assets folder itself (the one holding avatar-decorations/, nameplates/, profile-effects/ or profile-frames/), or a zip of it.')
-      if (workspace.items.length) replaceWorkspace(workspace)
+      if (workspace.items.length) { replaceWorkspace(workspace); setGallery(workspace.items[0].kind); setNav({ query: '', filter: 'all', collapsed: new Set() }) }
       setNotes(notes)
     } catch (e) {
       setNotes([`Couldn't read that: ${e instanceof Error ? e.message : String(e)}`])
@@ -58,19 +133,27 @@ export default function App() {
   const onDrop = (e: DragEvent) => {
     e.preventDefault()
     setDragging(false)
-    if (e.dataTransfer.items.length) void open('Reading…', () => fromDrop(e.dataTransfer))
+    const dt = e.dataTransfer
+    if (!dt.items.length) return
+    // The drop's entries must be taken now, before anything awaits.
+    const files = fromDrop(dt, (n) => setBusy({ label: `Found ${n.toLocaleString()} files`, done: 0, total: 0 }))
+    void openFiles(() => files)
   }
 
+  /** Export and Save to folder write saved items only. */
+  const draftsOk = () => !draftList.length || confirm(`${draftList.length} draft${draftList.length === 1 ? ' isn\'t' : 's aren\'t'} saved, so ${draftList.length === 1 ? 'it' : 'they'} won't be included. Continue?`)
   const doExport = async () => {
+    if (!draftsOk()) return
     if (errors && !confirm(`${errors} problem${errors === 1 ? '' : 's'} would make Parley refuse some items. Export anyway?`)) return
-    await exportZip(ws)
+    setBusy({ label: 'Making the zip', done: 0, total: 0 })
+    try { await exportZip(ws) } finally { setBusy(null) }
   }
   const doSave = async () => {
+    if (!draftsOk()) return
     if (errors && !confirm(`${errors} problem${errors === 1 ? '' : 's'} would make Parley refuse some items. Save anyway?`)) return
-    setBusy('Saving…')
     try {
-      const n = await saveToFolder(ws)
-      if (n !== null) setNotes([`Wrote ${n} file${n === 1 ? '' : 's'} into the folder.`])
+      const n = await saveToFolder(ws, (done, total) => setBusy({ label: 'Writing into the folder', done, total }))
+      if (n !== null) setNotes([`Wrote ${n.toLocaleString()} file${n === 1 ? '' : 's'} into the folder.`])
     } catch (e) {
       setNotes([`Couldn't write to that folder: ${e instanceof Error ? e.message : String(e)}`])
     } finally { setBusy(null) }
@@ -79,14 +162,14 @@ export default function App() {
   return (
     <div
       className="flex h-full flex-col"
-      onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
-      onDragLeave={(e) => { if (e.currentTarget === e.target) setDragging(false) }}
+      onDragOver={dragOver}
+      onDragLeave={(e) => { if (!e.relatedTarget || !e.currentTarget.contains(e.relatedTarget as Node)) setDragging(false) }}
       onDrop={onDrop}
     >
       <header className="flex flex-wrap items-center gap-2 border-b border-line bg-bg-1 px-4 py-2">
         <div className="mr-2 font-bold">Profile Studio <span className="text-xs font-normal text-text-2">for Parley</span></div>
-        <input ref={folderInput} type="file" className="hidden" multiple {...{ webkitdirectory: '' }} onChange={(e) => { const f = fromInput(e.target.files); e.target.value = ''; void open('Reading…', async () => f) }} data-open-folder-input />
-        <input ref={zipInput} type="file" className="hidden" accept=".zip" onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) void open('Reading…', () => fromZip(f)) }} data-open-zip-input />
+        <input ref={folderInput} type="file" className="hidden" multiple {...{ webkitdirectory: '' }} onChange={(e) => { const f = fromInput(e.target.files); e.target.value = ''; void openFiles(async () => f) }} data-open-folder-input />
+        <input ref={zipInput} type="file" className="hidden" accept=".zip" onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) void openFiles(() => fromZip(f), 'Opening the zip') }} data-open-zip-input />
         <button type="button" className="btn-ghost" onClick={() => folderInput.current?.click()} data-open-folder><FolderOpen size={16} />Open folder</button>
         <button type="button" className="btn-ghost" onClick={() => zipInput.current?.click()} data-open-zip>Open zip</button>
         <div className="relative">
@@ -94,65 +177,88 @@ export default function App() {
           {newOpen && (
             <div className="absolute left-0 top-full z-20 mt-1 w-56 rounded-lg border border-line bg-bg-2 p-1 shadow-xl" role="menu">
               {KINDS.map((k) => (
-                <button key={k} type="button" role="menuitem" className="block w-full rounded px-3 py-2 text-left text-sm hover:bg-bg-3" onClick={() => addItem(newItem(k))} data-new-kind={k}>{KIND_LABELS[k].one}</button>
+                <button key={k} type="button" role="menuitem" className="block w-full rounded px-3 py-2 text-left text-sm hover:bg-bg-3" onClick={() => create(k)} data-new-kind={k}>{KIND_LABELS[k].one}</button>
               ))}
             </div>
           )}
         </div>
         <div className="flex-1" />
-        <span className={`text-xs ${saved === 'off' ? 'text-warn' : 'text-text-2'}`} data-saved={saved}>{busy ?? SAVED_LABEL[saved]}</span>
+        {draftList.length > 0 && (
+          <div className="relative">
+            <button type="button" className="btn-ghost !text-accent" onClick={(e) => { e.stopPropagation(); setDraftsOpen(!draftsOpen) }} aria-expanded={draftsOpen} title="Work not saved yet" data-drafts><FilePen size={16} />Drafts {draftList.length}<ChevronDown size={14} /></button>
+            {draftsOpen && (
+              <div className="absolute right-0 top-full z-20 mt-1 max-h-96 w-72 overflow-y-auto rounded-lg border border-line bg-bg-2 p-1 shadow-xl" role="menu">
+                {draftList.map((d) => (
+                  <button key={d.uid} type="button" role="menuitem" className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm hover:bg-bg-3" onClick={() => open(d.uid)} data-draft-item={d.uid}>
+                    <span className="min-w-0 flex-1 truncate">{(d.entry.name as string) || keyOf(d) || 'Untitled'}</span>
+                    <span className="shrink-0 text-xs text-text-2">{isNewDraft(d.uid) ? `New ${KIND_LABELS[d.kind].one.toLowerCase()}` : 'Edited'}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+        <SaveStatus saved={saved} saving={saving} />
+        <button type="button" className={`btn-ghost ${page === 'templates' ? '!bg-bg-3 !text-text-0' : ''}`} onClick={() => setPage(page === 'templates' ? null : 'templates')} title="Templates for PhotoCraft, VectorCraft, Photoshop, Illustrator…" aria-pressed={page === 'templates'} data-open-templates><Shapes size={16} />Templates</button>
+        <button type="button" className={`btn-ghost !px-2 ${page === 'settings' ? '!bg-bg-3 !text-text-0' : ''}`} onClick={() => setPage(page === 'settings' ? null : 'settings')} title="Settings: allowed characters, file sizes" aria-pressed={page === 'settings'} data-open-settings><Gear size={16} /></button>
+        <button type="button" className={`btn-ghost ${page === 'publish' ? '!bg-bg-3 !text-text-0' : ''}`} disabled={!ws.items.length && page !== 'publish'} onClick={() => setPage(page === 'publish' ? null : 'publish')} title="Add and update these items on a Parley instance" aria-pressed={page === 'publish'} data-open-publish><CloudUpload size={16} />Publish</button>
         {canSaveToFolder() && <button type="button" className="btn-ghost" disabled={!ws.items.length || !!busy} onClick={() => void doSave()} title="Write into a folder, such as your instance's assets folder" data-save-folder><FolderOutput size={16} />Save to folder</button>}
-        <button type="button" className="btn-primary" disabled={!ws.items.length} onClick={() => void doExport()} title="parley-assets.zip, for Admin → Cosmetics → Import" data-export><Download size={16} />Export zip</button>
+        <button type="button" className="btn-primary" disabled={!ws.items.length || !!busy} onClick={() => void doExport()} title="parley-assets.zip, for Admin → Cosmetics → Import" data-export><Download size={16} />Export zip</button>
       </header>
 
+      {saveError && (
+        <div className="flex items-center gap-2 border-b border-line bg-warn/10 px-4 py-2 text-sm text-warn" data-save-error>
+          <Info size={16} className="shrink-0" /><span className="flex-1">{saveError}</span>
+        </div>
+      )}
       {notes.length > 0 && (
         <div className="flex items-start gap-2 border-b border-line bg-bg-3/60 px-4 py-2 text-sm text-text-1" data-notes>
           <Info size={16} className="mt-0.5 shrink-0 text-accent" />
-          <ul className="flex-1 space-y-0.5">{notes.map((n, i) => <li key={i}>{n}</li>)}</ul>
+          <ul className="max-h-32 flex-1 space-y-0.5 overflow-y-auto">{notes.map((n, i) => <li key={i}>{n}</li>)}</ul>
           <button type="button" className="text-text-2 hover:text-text-0" title="Dismiss" onClick={() => setNotes([])}><X size={16} /></button>
         </div>
       )}
 
       <div className="flex min-h-0 flex-1">
-        <nav className="w-64 shrink-0 overflow-y-auto border-r border-line bg-bg-1 p-2" data-sidebar>
-          {KINDS.map((k) => {
-            const items = ws.items.filter((i) => i.kind === k)
-            return (
-              <div key={k} className="mb-3">
-                <div className="flex items-center justify-between px-2 py-1">
-                  <span className="text-[11px] font-bold uppercase tracking-wider text-text-2" title={`${KIND_DIRS[k]}/`}>{KIND_LABELS[k].many}</span>
-                  <button type="button" className="text-text-2 hover:text-text-0" title={`New ${KIND_LABELS[k].one.toLowerCase()}`} onClick={() => addItem(newItem(k))}><Plus size={14} /></button>
+        {ws.items.length > 0 && (
+          <Sidebar items={shown} total={totals} problems={problems} nav={nav} setNav={setNav} selected={selected} galleryKind={page ? null : gallery} edited={drafts} onSelect={open} onGallery={setGallery} onNew={create} searchRef={searchRef} />
+        )}
+        <main className="min-w-0 flex-1 overflow-y-auto p-6" data-main>
+          <div className={`mx-auto ${item && !page && !gallery ? 'max-w-[1600px]' : 'max-w-6xl'}`}>
+            {page === 'settings' ? (
+              <Settings />
+            ) : page === 'templates' ? (
+              <Templates />
+            ) : page === 'publish' ? (
+              <Publish />
+            ) : gallery ? (
+              <Gallery kind={gallery} items={shown.get(gallery)!} total={totals.get(gallery) ?? 0} problems={problems} onOpen={open} onNew={() => create(gallery)} />
+            ) : item ? (
+              <>
+                <div className="mb-4 flex items-center gap-1 text-sm text-text-2" data-item-nav>
+                  <button type="button" className="btn-ghost !px-2 !py-1" onClick={() => setGallery(item.kind)} title="Browse them all (Esc)" data-back-gallery><LayoutGrid size={14} />{KIND_LABELS[item.kind].many}</button>
+                  <div className="flex-1" />
+                  {atKind >= 0 && <span data-item-position>{atKind + 1} of {sameKind.length}</span>}
+                  <button type="button" className="btn-ghost !px-2 !py-1" disabled={at <= 0} onClick={() => step(-1)} title="Previous (↑ or k)" data-prev><ChevronLeft size={16} /></button>
+                  <button type="button" className="btn-ghost !px-2 !py-1" disabled={at < 0 || at >= walk.length - 1} onClick={() => step(1)} title="Next (↓ or j)" data-next><ChevronRight size={16} /></button>
                 </div>
-                {items.map((it) => {
-                  const list = problems.get(it.uid) ?? []
-                  const err = list.filter((p) => p.level === 'error').length
-                  const warn = list.length - err
-                  return (
-                    <button
-                      key={it.uid}
-                      type="button"
-                      className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm ${it.uid === selected ? 'bg-bg-4 text-text-0' : 'text-text-1 hover:bg-bg-3'}`}
-                      onClick={() => select(it.uid)}
-                      data-item-row={it.uid}
-                      data-row-key={keyOf(it)}
-                    >
-                      <span className="min-w-0 flex-1 truncate">{(it.entry.name as string) || keyOf(it) || 'Untitled'}</span>
-                      {err > 0 && <span className="flex items-center gap-0.5 text-xs text-danger" title={`${err} error${err === 1 ? '' : 's'}: Parley would refuse it`} data-badge-error><CircleAlert size={12} />{err}</span>}
-                      {warn > 0 && <span className="flex items-center gap-0.5 text-xs text-warn" title={`${warn} warning${warn === 1 ? '' : 's'}`} data-badge-warning><AlertTriangle size={12} />{warn}</span>}
-                    </button>
-                  )
-                })}
-              </div>
-            )
-          })}
-        </nav>
-
-        <main className="min-w-0 flex-1 overflow-y-auto p-6">
-          {item ? <div className="mx-auto max-w-5xl"><ItemEditor key={item.uid} item={item} /></div> : loaded && <Welcome onFolder={() => folderInput.current?.click()} onNew={(k) => addItem(newItem(k))} />}
+                {drafts[item.uid] && (
+                  <div className="sticky top-0 z-10 -mx-2 mb-4 flex flex-wrap items-center gap-2 rounded-lg border border-accent/40 bg-bg-2/95 px-3 py-2 text-sm shadow-lg backdrop-blur" data-draft-bar={isNewDraft(item.uid) ? 'new' : 'edited'}>
+                    <FilePen size={16} className="shrink-0 text-accent" />
+                    <span className="flex-1 text-text-1">{isNewDraft(item.uid) ? 'New draft: it joins the list when you save it.' : 'Draft: the list and exports use the saved version until you save.'}</span>
+                    <button type="button" className="btn-ghost !py-1.5" onClick={() => { const fresh = isNewDraft(item.uid); if (!confirm(fresh ? 'Throw this new item away?' : 'Throw these changes away?')) return; discardDraft(item.uid); if (fresh) setGallery(item.kind) }} data-draft-discard><Undo2 size={14} />Discard</button>
+                    <button type="button" className="btn-primary !py-1.5" onClick={() => saveDraft(item.uid)} title="Save (Ctrl+S)" data-draft-save><Save size={14} />Save</button>
+                  </div>
+                )}
+                <ItemEditor key={item.uid} item={item} />
+              </>
+            ) : loaded && <Welcome onFolder={() => folderInput.current?.click()} onNew={create} />}
+          </div>
         </main>
       </div>
 
-      {dragging && (
+      {busy && <Loading progress={busy} />}
+      {dragging && !busy && (
         <div className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center bg-bg-0/70">
           <div className="rounded-xl border-2 border-dashed border-accent px-10 py-8 text-lg font-semibold">Drop an assets folder or zip to open it</div>
         </div>

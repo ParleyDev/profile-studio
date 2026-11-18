@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { assetId, newFrameLayer, okFileName, okFolderName, safeFileName } from './kinds'
+import { assetId, checkName, DEFAULT_RULES, newFrameLayer, okFileName, okFolderName, safeFileName, safeFolderName } from './kinds'
 import { validateItem } from './validate'
 import { metadataJson, readFolder, writeFolder, type FolderFile } from './workspace'
 import { readZip, writeZip } from './zip'
@@ -105,5 +105,40 @@ describe('checks', () => {
   it('flag pictures that aren\'t the right shape', async () => {
     const { workspace: ws } = await readFolder(folder())
     expect(validateItem(ws.items[0], ws, { 'Halo.png': { w: 300, h: 200 } }).some((p) => p.level === 'warning' && p.message.includes('square'))).toBe(true)
+  })
+  it('treat characters Import refuses as warnings, or errors when checking for Import', async () => {
+    const { workspace: ws } = await readFolder(folder())
+    const it0 = ws.items[0]
+    it0.entry.file = "Halo (gold), it's.png"
+    it0.files = { "Halo (gold), it's.png": png() }
+    const loose = validateItem(it0, ws)
+    expect(loose.filter((p) => p.level === 'error')).toEqual([])
+    expect(loose.some((p) => p.level === 'warning' && p.message.includes("Parley's Import refuses"))).toBe(true)
+    const strict = validateItem(it0, ws, {}, undefined, { ...DEFAULT_RULES, strictImport: true })
+    expect(strict.some((p) => p.level === 'error' && p.message.includes("Parley's Import refuses"))).toBe(true)
+    const none = validateItem(it0, ws, {}, undefined, { ...DEFAULT_RULES, extraChars: '' })
+    expect(none.some((p) => p.level === 'error' && p.message.includes('allowed'))).toBe(true)
+  })
+  it('make big files a warning unless checking for Import', async () => {
+    const { workspace: ws } = await readFolder(folder())
+    const big = new Blob([new Uint8Array(9 * 1024 * 1024)], { type: 'image/png' })
+    ws.items[0].files = { 'Halo.png': big }
+    expect(validateItem(ws.items[0], ws).find((p) => p.message.includes('9.0 MB'))?.level).toBe('warning')
+    expect(validateItem(ws.items[0], ws, {}, undefined, { ...DEFAULT_RULES, strictImport: true }).find((p) => p.message.includes('9.0 MB'))?.level).toBe('error')
+  })
+})
+
+describe('name rules', () => {
+  it('never allow path characters, even when asked to', () => {
+    expect(checkName('a/b.png', false, { ...DEFAULT_RULES, extraChars: '/' }).level).toBe('bad')
+    expect(checkName('a:b.png', false, { ...DEFAULT_RULES, extraChars: ':' }).level).toBe('bad')
+    expect(checkName(' a.png', false).level).toBe('bad')
+    expect(checkName('a (b).png', false).level).toBe('import')
+    expect(checkName('a_b.png', false).level).toBe('ok')
+  })
+  it('keep allowed characters when making names safe', () => {
+    expect(safeFileName("it's (gold).png", " '()")).toBe("it's (gold).png")
+    expect(safeFileName("it's (gold).png")).toBe('it_s_gold_.png')
+    expect(safeFolderName('a:b (c)', ' ()')).toBe('a_b (c)')
   })
 })

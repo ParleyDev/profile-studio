@@ -1,29 +1,35 @@
 import { ArrowDown, ArrowUp, Copy, Timer, Trash2 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { assetId, displayName, DEFAULT_LAYOUT, EFFECT_SPECIAL_FILES, extOf, FILE_EXTS, KIND_DIRS, KIND_LABELS, layered, MAX_DESCRIPTION, MAX_LAYOUT, MAX_MS, MAX_NAME, MAX_Z, newEffectLayer, newFrameLayer, safeFileName, safeFolderName, isVideo, type EffectLayer, type FrameLayer, type FrameLayout } from '../format/kinds'
 import { validateItem, type Problem } from '../format/validate'
 import { keyOf, newUid, typed, type Item } from '../format/workspace'
 import { animationLength, isAnimated, useFileUrls, useSizes } from '../lib/media'
+import { getRules, useRules } from '../lib/settings'
 import { addItem, moveItem, patchEntry, removeItem, updateItem, useStudio } from '../lib/store'
 import DecorationPreview from '../preview/DecorationPreview'
 import EffectPreview from '../preview/EffectPreview'
 import FramePreview from '../preview/FramePreview'
 import NameplatePreview from '../preview/NameplatePreview'
 import { DropFiles, Field, fmtSize, Num, Problems } from './Fields'
+import { OptimizeButton } from './Optimize'
+import { AssembleButton } from './Assemble'
 
 const accept = (exts: string[]) => exts.map((e) => `.${e}`).join(',')
 const stem = (f: string) => (f.includes('.') ? f.slice(0, f.lastIndexOf('.')) : f)
 
 export default function ItemEditor({ item }: { item: Item }) {
   const { ws } = useStudio()
+  const rules = useRules()
   const sizes = useSizes(item.files)
-  const problems = useMemo(() => validateItem(item, ws, sizes), [item, ws, sizes])
+  // Checked as if saved: the draft in place of the saved item (or added, when new), so duplicates count right.
+  const view = useMemo(() => ({ ...ws, items: ws.items.some((i) => i.uid === item.uid) ? ws.items.map((i) => (i.uid === item.uid ? item : i)) : [...ws.items, item] }), [ws, item])
+  const problems = useMemo(() => validateItem(item, view, sizes, undefined, rules), [item, view, sizes, rules])
   const key = keyOf(item)
   const field = layered(item.kind) ? 'folder' : 'file'
   const general = problems.filter((p) => !p.at?.startsWith('layer:') && !p.at?.startsWith('file:'))
 
   const duplicate = () => {
-    const taken = new Set(ws.items.filter((o) => o.kind === item.kind).map(keyOf))
+    const taken = new Set(view.items.filter((o) => o.kind === item.kind).map(keyOf))
     let k = key, n = 2
     const make = (i: number) => (layered(item.kind) ? `${key}_${i}` : `${stem(key)}_${i}.${extOf(key)}`)
     while (taken.has(k)) k = make(n++)
@@ -31,8 +37,8 @@ export default function ItemEditor({ item }: { item: Item }) {
     addItem({ uid: newUid(), kind: item.kind, entry: { ...structuredClone(item.entry), [field]: k, name: `${item.entry.name ?? ''} copy`.trim().slice(0, MAX_NAME) }, files })
   }
 
-  return (
-    <div className="space-y-6" data-item-editor={item.kind}>
+  const head = (
+    <>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <div className="text-xs font-bold uppercase tracking-wider text-text-2">{KIND_LABELS[item.kind].one}</div>
@@ -54,7 +60,7 @@ export default function ItemEditor({ item }: { item: Item }) {
           <input className="input" value={(item.entry.name as string) ?? ''} maxLength={MAX_NAME} onChange={(e) => patchEntry(item.uid, { name: e.target.value })} data-item-name />
         </Field>
         <Field label={layered(item.kind) ? 'Folder name' : 'File name'} hint={`Letters, digits, '_' and '-'${layered(item.kind) ? '' : ', then its extension'}. Members who wear it store its id, so keep it once people use it.`}>
-          <input className="input font-mono" value={key} onChange={(e) => rename(item, e.target.value)} onBlur={(e) => rename(item, layered(item.kind) ? safeFolderName(e.target.value) : safeFileName(e.target.value))} data-item-key />
+          <input className="input font-mono" value={key} onChange={(e) => rename(item, e.target.value)} onBlur={(e) => rename(item, layered(item.kind) ? safeFolderName(e.target.value, rules.extraChars) : safeFileName(e.target.value, rules.extraChars))} data-item-key />
         </Field>
         <div className="sm:col-span-2">
           <Field label="Description">
@@ -63,7 +69,29 @@ export default function ItemEditor({ item }: { item: Item }) {
         </div>
       </div>
 
-      {layered(item.kind) ? <LayeredBody item={item} problems={problems} sizes={sizes} /> : <FileBody item={item} problems={problems} sizes={sizes} />}
+    </>
+  )
+  return (
+    <div data-item-editor={item.kind}>
+      {layered(item.kind) ? <LayeredBody head={head} item={item} problems={problems} sizes={sizes} /> : <FileBody head={head} item={item} problems={problems} sizes={sizes} />}
+    </div>
+  )
+}
+
+/**
+ * The editor beside its preview when there's room: the preview stays in view while the fields scroll, so a change
+ * shows as it's made. Narrow screens stack them.
+ */
+function Split({ form, preview }: { form: ReactNode; preview: ReactNode }) {
+  return (
+    <div className="@container">
+      <div className="grid gap-6 @4xl:grid-cols-[minmax(0,1fr)_minmax(0,46%)] @4xl:items-start">
+        <div className="@container min-w-0 space-y-6">{form}</div>
+        <aside className="min-w-0 space-y-3 @4xl:sticky @4xl:top-16 @4xl:max-h-[calc(100dvh-9rem)] @4xl:overflow-y-auto" data-item-preview>
+          <div className="label">Preview</div>
+          {preview}
+        </aside>
+      </div>
     </div>
   )
 }
@@ -81,38 +109,41 @@ function rename(item: Item, next: string) {
 
 // --- decorations and nameplates: one file -------------------------------------------------------------------------
 
-function FileBody({ item, problems, sizes }: { item: Item; problems: Problem[]; sizes: Record<string, { w: number; h: number }> }) {
+function FileBody({ head, item, problems, sizes }: { head: ReactNode; item: Item; problems: Problem[]; sizes: Record<string, { w: number; h: number }> }) {
   const key = keyOf(item)
   const blob = item.files[key]
   const urls = useFileUrls(item.files)
   const [animated, setAnimated] = useState(false)
   useEffect(() => { let live = true; if (blob) void isAnimated(blob).then((a) => { if (live) setAnimated(a) }); return () => { live = false } }, [blob])
   const choose = (f: File) => updateItem(item.uid, (it) => {
-    const name = keyOf(it) ? `${stem(keyOf(it))}.${extOf(f.name)}` : safeFileName(f.name)
+    const name = keyOf(it) ? `${stem(keyOf(it))}.${extOf(f.name)}` : safeFileName(f.name, getRules().extraChars)
     return { ...it, entry: { ...it.entry, file: name, name: (it.entry.name as string) || displayName(stem(name)) }, files: { [name]: typed(f, name) } }
   })
   const sz = sizes[key]
   const fileProblems = problems.filter((p) => p.at?.startsWith('file:'))
   return (
-    <>
+    <Split preview={item.kind === 'decoration' ? <DecorationPreview src={urls[key]} animated={animated} /> : <NameplatePreview src={urls[key]} video={isVideo(key)} />} form={<>
+      {head}
       <section className="space-y-2">
         <div className="label">{item.kind === 'decoration' ? 'Picture' : 'Loop or picture'}</div>
         <DropFiles accept={accept(FILE_EXTS[item.kind])} onFiles={(f) => choose(f[0])} data-item-file>
-          {blob ? <><span className="font-mono text-text-1">{key}</span> · {fmtSize(blob.size)}{sz ? ` · ${sz.w}×${sz.h}` : ''}{animated ? ' · animated' : ''}</> : item.kind === 'decoration' ? 'A square PNG, APNG, GIF or WebP with a see-through middle. Drop it here.' : 'A WebM or MP4 loop, or a PNG, APNG, GIF or WebP. Drop it here.'}
+          {blob ? <><span className="font-mono text-text-1">{key}</span> · {fmtSize(blob.size)}{sz ? ` · ${sz.w}×${sz.h}` : ''}{animated ? ' · animated' : ''}{' '}<OptimizeButton name={key} blob={blob} allowScale onApply={(b) => updateItem(item.uid, (it) => ({ ...it, files: { ...it.files, [key]: typed(b, key) } }))} /></> : item.kind === 'decoration' ? 'A square PNG, APNG, GIF or WebP with a see-through middle. Drop it here.' : 'A WebM or MP4 loop, or a PNG, APNG, GIF or WebP. Drop it here.'}
         </DropFiles>
+        {item.kind === 'decoration' || item.kind === 'nameplate' ? (
+          <div className="flex items-center gap-2 text-xs text-text-2">
+            <AssembleButton onDone={(b) => choose(new File([b], `${stem(key) || 'animation'}.png`, { type: 'image/png' }))} />
+            Exported a PNG sequence? Pick all its frames to make the animated PNG.
+          </div>
+        ) : null}
         <Problems list={fileProblems} />
       </section>
-      <section className="space-y-3">
-        <div className="label">Preview</div>
-        {item.kind === 'decoration' ? <DecorationPreview src={urls[key]} animated={animated} /> : <NameplatePreview src={urls[key]} video={isVideo(key)} />}
-      </section>
-    </>
+    </>} />
   )
 }
 
 // --- effects and frames: a folder of layers -----------------------------------------------------------------------
 
-function LayeredBody({ item, problems, sizes }: { item: Item; problems: Problem[]; sizes: Record<string, { w: number; h: number }> }) {
+function LayeredBody({ head, item, problems, sizes }: { head: ReactNode; item: Item; problems: Problem[]; sizes: Record<string, { w: number; h: number }> }) {
   const urls = useFileUrls(item.files)
   const layers = (Array.isArray(item.entry.layers) ? item.entry.layers : []) as (EffectLayer | FrameLayer)[]
   const fx = item.kind === 'effect'
@@ -125,7 +156,7 @@ function LayeredBody({ item, problems, sizes }: { item: Item; problems: Problem[
     const cur = (Array.isArray(it.entry.layers) ? it.entry.layers : []) as (EffectLayer | FrameLayer)[]
     const added: (EffectLayer | FrameLayer)[] = []
     for (const f of list) {
-      const name = as ?? safeFileName(f.name)
+      const name = as ?? safeFileName(f.name, getRules().extraChars)
       files[name] = typed(f, name)
       // A new picture becomes a layer straight away; the stills and thumbnail are picked up by name instead.
       if (!as && !special.has(name) && !cur.some((l) => l.file === name) && !added.some((l) => l.file === name)) {
@@ -150,20 +181,35 @@ function LayeredBody({ item, problems, sizes }: { item: Item; problems: Problem[
   const pictures = Object.keys(item.files).filter((f) => !special.has(f)).sort()
 
   return (
-    <>
+    <Split preview={fx
+      ? <EffectPreview layers={layers as EffectLayer[]} files={item.files} still={urls['reduced_motion.png'] ?? urls['static.png']} />
+      : <FramePreview draft={{ layout, fileUrl: (f) => urls[f] ?? '', layers: (layers as FrameLayer[]).filter((l) => urls[l.file] && sizes[l.file]).map((l) => ({ ...l, width: sizes[l.file].w, height: sizes[l.file].h })) }} />} form={<>
+      {head}
       <section className="space-y-2" data-item-files>
         <div className="label">Files in the folder</div>
         <DropFiles accept={accept(FILE_EXTS[item.kind])} multiple onFiles={(f) => addFiles(f)} data-item-add-files>
           {fx ? 'Animated PNGs (or GIF / WebP) drawn for a 1200 px wide card. Each new one becomes a layer.' : 'Pictures drawn for a 1200 px wide card. Names like front_staple_top.png place the layer for you.'}
         </DropFiles>
+        {fx && (
+          <div className="flex items-center gap-2 text-xs text-text-2">
+            <AssembleButton onDone={(b, ms) => updateItem(item.uid, (it) => {
+              let n = 1
+              while (it.files[`layer_${String(n).padStart(2, '0')}.png`]) n++
+              const name = `layer_${String(n).padStart(2, '0')}.png`
+              const cur = (Array.isArray(it.entry.layers) ? it.entry.layers : []) as EffectLayer[]
+              return { ...it, files: { ...it.files, [name]: typed(b, name) }, entry: { ...it.entry, layers: [...cur, { ...newEffectLayer(name, 100 + cur.length * 10), duration_ms: Math.min(MAX_MS, ms) }] } }
+            })} label="Layer from frames" />
+            Exported a PNG sequence? Pick all its frames: it becomes a new layer that plays for the sequence's length.
+          </div>
+        )}
         <ul className="divide-y divide-line rounded-lg border border-line">
           {Object.keys(item.files).sort().map((f) => (
-            <FileRow key={f} name={f} blob={item.files[f]} url={urls[f]} size={sizes[f]} role={special.has(f) ? f : undefined} onRename={(to) => renameFile(f, to)} onRemove={() => removeFile(f)} problems={problems.filter((p) => p.at === `file:${f}`)} />
+            <FileRow key={f} name={f} blob={item.files[f]} url={urls[f]} size={sizes[f]} role={special.has(f) ? f : undefined} onRename={(to) => renameFile(f, to)} onRemove={() => removeFile(f)} onReplace={(b) => updateItem(item.uid, (it) => ({ ...it, files: { ...it.files, [f]: typed(b, f) } }))} allowScale={fx} problems={problems.filter((p) => p.at === `file:${f}`)} />
           ))}
           {!Object.keys(item.files).length && <li className="p-3 text-sm text-text-2">No files yet.</li>}
         </ul>
         {fx && (
-          <div className="grid gap-2 sm:grid-cols-3">
+          <div className="grid gap-2 @2xl:grid-cols-3">
             {([['static.png', 'Still', 'Shown in pickers.'], ['reduced_motion.png', 'Reduced motion', 'Shown instead of playing it.'], ['thumbnail.png', 'Thumbnail', 'Pickers show this first.']] as const).map(([name, label, hint]) => (
               <DropFiles key={name} compact accept=".png" onFiles={(f) => addFiles(f, name)} data-effect-special={name}>
                 <span className="block font-semibold text-text-1">{label}{item.files[name] ? ' ✓' : ''}</span><span className="text-xs">{hint}</span>
@@ -210,26 +256,20 @@ function LayeredBody({ item, problems, sizes }: { item: Item; problems: Problem[
           </div>
         ))}
       </section>
-
-      <section className="space-y-3">
-        <div className="label">Preview</div>
-        {fx
-          ? <EffectPreview layers={layers as EffectLayer[]} files={item.files} still={urls['reduced_motion.png'] ?? urls['static.png']} />
-          : <FramePreview draft={{ layout, fileUrl: (f) => urls[f] ?? '', layers: (layers as FrameLayer[]).filter((l) => urls[l.file] && sizes[l.file]).map((l) => ({ ...l, width: sizes[l.file].w, height: sizes[l.file].h })) }} />}
-      </section>
-    </>
+    </>} />
   )
 }
 
-function FileRow({ name, blob, url, size, role, onRename, onRemove, problems }: { name: string; blob: Blob; url?: string; size?: { w: number; h: number }; role?: string; onRename: (to: string) => void; onRemove: () => void; problems: Problem[] }) {
+function FileRow({ name, blob, url, size, role, onRename, onRemove, onReplace, allowScale, problems }: { name: string; blob: Blob; url?: string; size?: { w: number; h: number }; role?: string; onRename: (to: string) => void; onRemove: () => void; onReplace: (b: Blob) => void; allowScale: boolean; problems: Problem[] }) {
   const [draft, setDraft] = useState(name)
   useEffect(() => setDraft(name), [name])
   return (
     <li className="p-2" data-file-row={name}>
       <div className="flex items-center gap-3">
         <span className="checker flex h-10 w-14 shrink-0 items-center justify-center overflow-hidden rounded">{url && <img src={url} alt="" className="max-h-full max-w-full" />}</span>
-        {role ? <span className="min-w-0 flex-1 truncate font-mono text-sm">{name}</span> : <input className="input !py-1 min-w-0 flex-1 font-mono" value={draft} onChange={(e) => setDraft(e.target.value)} onBlur={() => onRename(safeFileName(draft))} onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }} />}
+        {role ? <span className="min-w-0 flex-1 truncate font-mono text-sm">{name}</span> : <input className="input !py-1 min-w-0 flex-1 font-mono" value={draft} onChange={(e) => setDraft(e.target.value)} onBlur={() => onRename(safeFileName(draft, getRules().extraChars))} onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }} />}
         <span className="shrink-0 text-xs text-text-2">{fmtSize(blob.size)}{size ? ` · ${size.w}×${size.h}` : ''}</span>
+        <OptimizeButton name={name} blob={blob} allowScale={allowScale} onApply={onReplace} />
         <button type="button" className="btn-ghost !px-2 hover:!text-danger" title="Remove the file" onClick={onRemove}><Trash2 size={14} /></button>
       </div>
       <Problems list={problems} />

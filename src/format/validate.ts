@@ -1,9 +1,10 @@
-import { assetId, EFFECT_SPECIAL_FILES, KIND_DIRS, layered, MAX_DESCRIPTION, MAX_FILE, MAX_LAYERS, MAX_LAYOUT, MAX_MS, MAX_NAME, MAX_Z, okFileName, okFolderName, type EffectLayer, type FrameLayer, type FrameLayout } from './kinds'
+import { assetId, type Rules, EFFECT_SPECIAL_FILES, KIND_DIRS, layered, MAX_DESCRIPTION, checkName, DEFAULT_RULES, extOf, FILE_EXTS, MAX_FILE, MAX_LAYERS, MAX_LAYOUT, MAX_MS, MAX_NAME, MAX_Z, type EffectLayer, type FrameLayer, type FrameLayout } from './kinds'
 import { keyOf, type Item, type Workspace } from './workspace'
 
 /**
- * What Parley would say about an item. `error`: Parley refuses it (the importer rejects it, or the server skips it
- * when it reads the folder). `warning`: it works, but probably not as meant.
+ * What Parley would say about an item. `error`: Parley refuses it (it won't read it from the folder, or, when the
+ * rules say you use Import, Import rejects it). `warning`: it works, but probably not as meant, or Import would refuse
+ * it while a copy into the assets folder works.
  */
 export interface Problem { level: 'error' | 'warning'; message: string; /** The field or layer it is about, for the editor. */ at?: string }
 
@@ -13,7 +14,7 @@ const int = (v: unknown, max: number) => typeof v === 'number' && Number.isInteg
 /** Pixel sizes of an item's pictures, when known (the editor measures them), for the checks that need them. */
 export type Sizes = Record<string, { w: number; h: number }>
 
-export function validateItem(it: Item, ws?: Workspace, sizes: Sizes = {}): Problem[] {
+export function validateItem(it: Item, ws?: Workspace, sizes: Sizes = {}, index?: WorkspaceIndex, rules: Rules = DEFAULT_RULES): Problem[] {
   const out: Problem[] = []
   const err = (message: string, at?: string) => out.push({ level: 'error', message, at })
   const warn = (message: string, at?: string) => out.push({ level: 'warning', message, at })
@@ -26,18 +27,25 @@ export function validateItem(it: Item, ws?: Workspace, sizes: Sizes = {}): Probl
   else if (name.length > MAX_NAME) err(`Names are up to ${MAX_NAME} characters.`, 'name')
   if (typeof e.description === 'string' && e.description.trim().length > MAX_DESCRIPTION) err(`Descriptions are up to ${MAX_DESCRIPTION} characters.`, 'description')
 
-  if (!key) err(`It needs a ${field} name.`, field)
-  else if (layered(it.kind) ? !okFolderName(key) : !okFileName(it.kind, key)) {
-    err(layered(it.kind) ? 'Folder names are letters, digits, \'_\' and \'-\'.' : `File names are letters, digits, '.', '_' and '-', ending in ${extList(it)}.`, field)
+  /** A file or folder name against the rules; `label` says which name it is. */
+  const name_ = (n: string, folder: boolean, label: string, at: string) => {
+    const v = checkName(n, folder, rules)
+    const list = v.chars.map((c) => (c === ' ' ? 'spaces' : `'${c}'`)).join(', ')
+    if (v.level === 'bad') err(v.reason ? `${label} ${v.reason}.` : `${label} has ${list}, which ${v.chars.length === 1 ? 'isn\'t' : 'aren\'t'} allowed (Settings lists the characters you allow).`, at)
+    else if (v.level === 'import') (rules.strictImport ? err : warn)(`${label} has ${list}: fine copied into an assets folder, but Parley's Import refuses ${v.chars.length === 1 ? 'it' : 'them'}.`, at)
+    if (!folder && !FILE_EXTS[it.kind].includes(extOf(n))) err(`${label} needs to end in ${extList(it)}.`, at)
   }
+  if (!key) err(`It needs a ${field} name.`, field)
+  else name_(key, layered(it.kind), layered(it.kind) ? 'The folder name' : 'The file name', field)
   if (ws && key) {
-    const same = ws.items.filter((o) => o.kind === it.kind && o !== it)
-    if (same.some((o) => keyOf(o) === key)) err(`Another ${field} in ${KIND_DIRS[it.kind]} has this name.`, field)
-    else if (same.some((o) => keyOf(o) && assetId(keyOf(o), o.kind) === assetId(key, it.kind))) err(`Parley would give this the same id as another one (${assetId(key, it.kind)}), and keep only one.`, field)
+    const idx = index ?? indexWorkspace(ws)
+    if ((idx.keys.get(`${it.kind}\0${key}`) ?? 0) > 1) err(`Another ${field} in ${KIND_DIRS[it.kind]} has this name.`, field)
+    else if ((idx.ids.get(`${it.kind}\0${assetId(key, it.kind)}`) ?? 0) > 1) err(`Parley would give this the same id as another one (${assetId(key, it.kind)}), and keep only one.`, field)
   }
 
   for (const [f, b] of Object.entries(it.files)) {
-    if (b.size > MAX_FILE) err(`${f} is ${mb(b.size)}; Parley takes files up to ${mb(MAX_FILE)}.`, `file:${f}`)
+    if (rules.strictImport && b.size > MAX_FILE) err(`${f} is ${mb(b.size)}; Parley's Import takes files up to ${mb(MAX_FILE)}. Optimize can shrink it.`, `file:${f}`)
+    else if (b.size > rules.maxFileMB * 1024 * 1024) warn(`${f} is ${mb(b.size)}, over ${rules.maxFileMB} MB: slow to load${b.size > MAX_FILE ? ', and Parley\'s Import refuses it (a copy into the assets folder works)' : ''}. Optimize can shrink it.`, `file:${f}`)
     if (b.size === 0) err(`${f} is empty.`, `file:${f}`)
   }
 
@@ -52,7 +60,7 @@ export function validateItem(it: Item, ws?: Workspace, sizes: Sizes = {}): Probl
     return out
   }
 
-  for (const f of Object.keys(it.files)) if (!okFileName(it.kind, f)) err(`${f}: file names are letters, digits, '.', '_' and '-', ending in ${extList(it)}.`, `file:${f}`)
+  for (const f of Object.keys(it.files)) name_(f, false, f, `file:${f}`)
   const layers = Array.isArray(e.layers) ? (e.layers as (EffectLayer | FrameLayer)[]) : []
   if (!layers.length) err('It needs at least one layer.', 'layers')
   if (layers.length > MAX_LAYERS) err(`Items have up to ${MAX_LAYERS} layers.`, 'layers')
@@ -90,8 +98,40 @@ export function validateItem(it: Item, ws?: Workspace, sizes: Sizes = {}): Probl
   return out
 }
 
-export function validateWorkspace(ws: Workspace): Map<string, Problem[]> {
-  return new Map(ws.items.map((it) => [it.uid, validateItem(it, ws)]))
+/** How many items of a kind share each key and each Parley id, so duplicate checks don't compare every pair. */
+export interface WorkspaceIndex { keys: Map<string, number>; ids: Map<string, number> }
+export function indexWorkspace(ws: Workspace): WorkspaceIndex {
+  const keys = new Map<string, number>(), ids = new Map<string, number>()
+  for (const o of ws.items) {
+    const k = keyOf(o)
+    if (!k) continue
+    keys.set(`${o.kind}\0${k}`, (keys.get(`${o.kind}\0${k}`) ?? 0) + 1)
+    const id = `${o.kind}\0${assetId(k, o.kind)}`
+    ids.set(id, (ids.get(id) ?? 0) + 1)
+  }
+  return { keys, ids }
+}
+
+/**
+ * Every item's problems. Items are immutable, so an item whose object and duplicate counts are unchanged since the
+ * last run reuses its result: typing in one item re-checks that one, not the thousands around it.
+ */
+const memo = new WeakMap<Item, { sig: string; list: Problem[] }>()
+let memoRules: Rules | null = null
+export function validateWorkspace(ws: Workspace, rules: Rules = DEFAULT_RULES): Map<string, Problem[]> {
+  const index = indexWorkspace(ws)
+  // Other rules: nothing remembered applies.
+  const fresh = memoRules !== rules
+  memoRules = rules
+  return new Map(ws.items.map((it) => {
+    const k = keyOf(it)
+    const sig = k ? `${index.keys.get(`${it.kind}\0${k}`)}/${index.ids.get(`${it.kind}\0${assetId(k, it.kind)}`)}` : ''
+    const hit = memo.get(it)
+    if (!fresh && hit && hit.sig === sig) return [it.uid, hit.list]
+    const list = validateItem(it, ws, {}, index, rules)
+    memo.set(it, { sig, list })
+    return [it.uid, list]
+  }))
 }
 
 const extList = (it: Item) => (it.kind === 'nameplate' ? 'png, apng, gif, webp, webm or mp4' : 'png, apng, gif or webp')

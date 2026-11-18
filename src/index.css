@@ -56,3 +56,5 @@ body { margin: 0; background: var(--color-bg-2); color: var(--color-text-0); fon
 /* Checkerboard behind pictures, so see-through parts show. */
 .checker { background-color: #1b1c22; background-image: conic-gradient(#25262e 25%, transparent 0 50%, #25262e 0 75%, transparent 0); background-size: 16px 16px; }
 :root[data-theme="light"] .checker { background-color: #f4f4f6; background-image: conic-gradient(#e2e3e8 25%, transparent 0 50%, #e2e3e8 0 75%, transparent 0); }
+
+@keyframes slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(300%); } }

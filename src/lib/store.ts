@@ -1,68 +1,269 @@
 import { useSyncExternalStore } from 'react'
+import type { Kind } from '../format/kinds'
 import { emptyWorkspace, type Entry, type Item, type Workspace } from '../format/workspace'
 
-/**
+/*
  * The open workspace, kept in this browser (IndexedDB) as you work, so closing the tab loses nothing. Nothing leaves
  * the browser: exporting is a download or a write to a folder you pick.
+ *
+ * An assets folder can run to thousands of items and gigabytes of pictures, so it is stored in pieces: one record per
+ * item, each file once under its own id, and the order separately. A save writes only the items that changed and the
+ * files not stored yet, and drops files nothing uses any more.
  */
 
-const DB = 'parley-profile-studio', STORE = 'workspace', KEY = 'current'
+const DB = 'parley-profile-studio', VERSION = 3
+const LEGACY = 'workspace', META = 'meta', ITEMS = 'items', BLOBS = 'blobs', DRAFTS = 'drafts'
 
+interface ItemRec { uid: string; kind: Kind; entry: Entry; files: Record<string, string> }
+interface MetaRec { order: string[]; extras: Workspace['extras'] }
+
+let dbp: Promise<IDBDatabase> | null = null
 function db(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const r = indexedDB.open(DB, 1)
-    r.onupgradeneeded = () => r.result.createObjectStore(STORE)
+  dbp ??= new Promise((resolve, reject) => {
+    const r = indexedDB.open(DB, VERSION)
+    r.onupgradeneeded = () => {
+      for (const s of [LEGACY, META, ITEMS, BLOBS, DRAFTS]) if (!r.result.objectStoreNames.contains(s)) r.result.createObjectStore(s)
+    }
     r.onsuccess = () => resolve(r.result)
-    r.onerror = () => reject(r.error)
+    r.onerror = () => { dbp = null; reject(r.error) }
   })
+  return dbp
 }
-async function idb<T>(mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest): Promise<T> {
-  const d = await db()
-  return new Promise((resolve, reject) => {
-    const req = fn(d.transaction(STORE, mode).objectStore(STORE))
-    req.onsuccess = () => resolve(req.result as T)
-    req.onerror = () => reject(req.error)
-  })
+const req = <T>(r: IDBRequest): Promise<T> => new Promise((res, rej) => { r.onsuccess = () => res(r.result as T); r.onerror = () => rej(r.error) })
+async function tx(stores: string[], fn: (t: IDBTransaction) => void): Promise<void> {
+  const t = (await db()).transaction(stores, 'readwrite')
+  fn(t)
+  return new Promise((res, rej) => { t.oncomplete = () => res(); t.onerror = () => rej(t.error); t.onabort = () => rej(t.error ?? new Error('aborted')) })
 }
 
-interface State { ws: Workspace; selected: string | null; loaded: boolean; saved: 'saved' | 'saving' | 'unsaved' | 'off' }
-let state: State = { ws: emptyWorkspace(), selected: null, loaded: false, saved: 'saved' }
+// --- state ----------------------------------------------------------------------------------------------------------
+
+export interface Progress { label: string; done: number; total: number; bytes?: boolean }
+export type Saved = 'saved' | 'saving' | 'unsaved' | 'off'
+interface State {
+  /** The saved items: what the list shows and what export writes. */
+  ws: Workspace
+  /**
+   * Work not saved yet, by uid: a new item (no saved one with its uid) or changes to a saved one. Edits go here; Save
+   * moves a draft into the workspace, Discard drops it.
+   */
+  drafts: Record<string, Item>
+  selected: string | null
+  loaded: boolean
+  saved: Saved
+  /** Why saving stopped, when it did (a full disk, say). */
+  saveError: string | null
+  /** A save in progress big enough to show (the first save of a large folder). */
+  saving: Progress | null
+  /** Work that blocks the page: opening the last workspace, reading a folder. */
+  busy: Progress | null
+}
+let state: State = { ws: emptyWorkspace(), drafts: {}, selected: null, loaded: false, saved: 'saved', saveError: null, saving: null, busy: null }
 const listeners = new Set<() => void>()
 const set = (next: Partial<State>) => { state = { ...state, ...next }; listeners.forEach((l) => l()) }
-export const useStudio = () => useSyncExternalStore((l) => { listeners.add(l); return () => { listeners.delete(l) } }, () => state, () => state)
+const subscribe = (l: () => void) => { listeners.add(l); return () => { listeners.delete(l) } }
+export const useStudio = () => useSyncExternalStore(subscribe, () => state, () => state)
 export const getState = () => state
+export const setBusy = (busy: Progress | null) => set({ busy })
+
+// --- saving ---------------------------------------------------------------------------------------------------------
+
+const blobIds = new WeakMap<Blob, string>()
+let nextBlob = 0
+const blobId = (b: Blob) => {
+  let id = blobIds.get(b)
+  if (!id) { id = `b${Date.now().toString(36)}${(nextBlob++).toString(36)}${Math.random().toString(36).slice(2, 6)}`; blobIds.set(b, id) }
+  return id
+}
+/** What the database holds: each item as last written (by identity) and the files stored. */
+const savedItems = new Map<string, Item>()
+const savedDrafts = new Map<string, Item>()
+const savedBlobs = new Set<string>()
+let savedMeta: { order: string[]; extras: Workspace['extras'] } | null = null
 
 let timer: number | undefined
+let flushing = false, again = false
 function persist() {
+  if (state.saved === 'off') return
   set({ saved: 'unsaved' })
   window.clearTimeout(timer)
-  timer = window.setTimeout(async () => {
-    set({ saved: 'saving' })
-    try { await idb('readwrite', (s) => s.put(state.ws, KEY)); set({ saved: 'saved' }) } catch { set({ saved: 'off' }) }
-  }, 400)
+  timer = window.setTimeout(() => void flush(), 400)
 }
+
+/** Files go in transactions of about this many bytes, so a big first save shows progress and doesn't hold one huge transaction. */
+const BATCH_BYTES = 48 * 1024 * 1024
+
+const record = (it: Item): ItemRec => ({ uid: it.uid, kind: it.kind, entry: it.entry, files: Object.fromEntries(Object.entries(it.files).map(([n, b]) => [n, blobId(b)])) })
+
+async function flush() {
+  if (flushing) { again = true; return }
+  flushing = true
+  set({ saved: 'saving' })
+  try {
+    do {
+      again = false
+      const ws = state.ws
+      const changed = ws.items.filter((it) => savedItems.get(it.uid) !== it)
+      const live = new Set(ws.items.map((i) => i.uid))
+      const removed = [...savedItems.keys()].filter((u) => !live.has(u))
+      const drafts = Object.values(state.drafts)
+      const dChanged = drafts.filter((d) => savedDrafts.get(d.uid) !== d)
+      const dLive = new Set(drafts.map((d) => d.uid))
+      const dRemoved = [...savedDrafts.keys()].filter((u) => !dLive.has(u))
+
+      // New files first, so an item record never points at a file that isn't stored.
+      const fresh = new Map<string, Blob>()
+      for (const it of [...changed, ...dChanged]) for (const b of Object.values(it.files)) { const id = blobId(b); if (!savedBlobs.has(id)) fresh.set(id, b) }
+      const total = [...fresh.values()].reduce((n, b) => n + b.size, 0)
+      const show = total > 8 * 1024 * 1024
+      let done = 0
+      let batch: [string, Blob][] = [], size = 0
+      const write = async () => {
+        if (!batch.length) return
+        const list = batch
+        await tx([BLOBS], (t) => { for (const [id, b] of list) t.objectStore(BLOBS).put(b, id) })
+        for (const [id, b] of list) { savedBlobs.add(id); done += b.size }
+        batch = []; size = 0
+        if (show) set({ saving: { label: 'Keeping a copy in this browser', done, total, bytes: true } })
+      }
+      if (show) set({ saving: { label: 'Keeping a copy in this browser', done: 0, total, bytes: true } })
+      for (const entry of fresh) { batch.push(entry); size += entry[1].size; if (size >= BATCH_BYTES) await write() }
+      await write()
+
+      const order = ws.items.map((i) => i.uid)
+      const metaChanged = !savedMeta || savedMeta.extras !== ws.extras || savedMeta.order.length !== order.length || savedMeta.order.some((u, i) => u !== order[i])
+      if (changed.length || removed.length || metaChanged || dChanged.length || dRemoved.length) {
+        await tx([ITEMS, META, DRAFTS], (t) => {
+          for (const it of changed) t.objectStore(ITEMS).put(record(it), it.uid)
+          for (const u of removed) t.objectStore(ITEMS).delete(u)
+          for (const d of dChanged) t.objectStore(DRAFTS).put(record(d), d.uid)
+          for (const u of dRemoved) t.objectStore(DRAFTS).delete(u)
+          if (metaChanged) t.objectStore(META).put({ order, extras: ws.extras } satisfies MetaRec, 'ws')
+        })
+        for (const it of changed) savedItems.set(it.uid, it)
+        for (const u of removed) savedItems.delete(u)
+        for (const d of dChanged) savedDrafts.set(d.uid, d)
+        for (const u of dRemoved) savedDrafts.delete(u)
+        savedMeta = { order, extras: ws.extras }
+      }
+
+      // Files nothing uses any more.
+      const used = new Set<string>()
+      for (const it of [...savedItems.values(), ...savedDrafts.values()]) for (const b of Object.values(it.files)) used.add(blobId(b))
+      const orphans = [...savedBlobs].filter((id) => !used.has(id))
+      if (orphans.length) {
+        await tx([BLOBS], (t) => { for (const id of orphans) t.objectStore(BLOBS).delete(id) })
+        for (const id of orphans) savedBlobs.delete(id)
+      }
+    } while (again)
+    set({ saved: state.ws.items.every((it) => savedItems.get(it.uid) === it) && Object.values(state.drafts).every((d) => savedDrafts.get(d.uid) === d) ? 'saved' : 'unsaved', saving: null })
+  } catch (e) {
+    const quota = e instanceof DOMException && e.name === 'QuotaExceededError'
+    set({ saved: 'off', saving: null, saveError: quota ? 'This browser is out of room for the workspace. Export a zip to keep your work.' : `Saving stopped: ${e instanceof Error ? e.message : String(e)}. Export a zip to keep your work.` })
+  } finally { flushing = false }
+}
+
+/** Try saving again after it stopped. */
+export function retrySave() { set({ saved: 'unsaved', saveError: null }); void flush() }
+
+// --- restoring ------------------------------------------------------------------------------------------------------
 
 /** The last workspace from this browser, when there is one. */
 export async function restore() {
+  set({ busy: { label: 'Opening your workspace', done: 0, total: 0 } })
   try {
-    const ws = await idb<Workspace | undefined>('readonly', (s) => s.get(KEY))
-    if (ws?.items) set({ ws, selected: ws.items[0]?.uid ?? null })
-  } catch { set({ saved: 'off' }) }
-  set({ loaded: true })
+    const d = await db()
+    const read = d.transaction([META, ITEMS, BLOBS, LEGACY, DRAFTS], 'readonly')
+    const meta = await req<MetaRec | undefined>(read.objectStore(META).get('ws'))
+    if (!meta) {
+      // A workspace saved whole by the first version: load it, then store it the new way.
+      const old = await req<Workspace | undefined>(read.objectStore(LEGACY).get('current'))
+      if (old?.items) {
+        set({ ws: old, selected: old.items[0]?.uid ?? null })
+        persist()
+        void tx([LEGACY], (t) => t.objectStore(LEGACY).delete('current')).catch(() => {})
+      }
+      return
+    }
+    const [recs, draftRecs, blobKeys, blobs] = await Promise.all([
+      req<ItemRec[]>(read.objectStore(ITEMS).getAll()),
+      req<ItemRec[]>(read.objectStore(DRAFTS).getAll()),
+      req<string[]>(read.objectStore(BLOBS).getAllKeys()),
+      req<Blob[]>(read.objectStore(BLOBS).getAll()),
+    ])
+    const byId = new Map<string, Blob>()
+    blobKeys.forEach((k, i) => { byId.set(k, blobs[i]); blobIds.set(blobs[i], k); savedBlobs.add(k) })
+    const recBy = new Map(recs.map((r) => [r.uid, r]))
+    const fromRec = (r: ItemRec): Item => {
+      const files: Record<string, Blob> = {}
+      for (const [n, id] of Object.entries(r.files)) { const b = byId.get(id); if (b) files[n] = b }
+      return { uid: r.uid, kind: r.kind, entry: r.entry, files }
+    }
+    const items: Item[] = []
+    for (const uid of meta.order) {
+      const r = recBy.get(uid)
+      if (!r) continue
+      const it = fromRec(r)
+      items.push(it)
+      savedItems.set(uid, it)
+    }
+    const drafts: Record<string, Item> = {}
+    for (const r of draftRecs) { const d = fromRec(r); drafts[d.uid] = d; savedDrafts.set(d.uid, d) }
+    savedMeta = { order: meta.order, extras: meta.extras }
+    const ws: Workspace = { items, extras: meta.extras ?? {} }
+    savedMeta.extras = ws.extras
+    set({ ws, drafts, selected: items[0]?.uid ?? null })
+    // Records or files left over from an interrupted save get tidied by the next save.
+    if (recs.length !== items.length || blobKeys.length) persist()
+  } catch {
+    set({ saved: 'off', saveError: 'This browser blocks storage, so your work isn\'t kept between visits. Export a zip to keep it.' })
+  } finally {
+    set({ loaded: true, busy: null })
+  }
 }
 
-export function replaceWorkspace(ws: Workspace) { set({ ws, selected: ws.items[0]?.uid ?? null }); persist() }
+// --- edits ----------------------------------------------------------------------------------------------------------
+
+/** An item as you see it in the editor: its draft when there is one, else the saved one. */
+export const current = (uid: string): Item | undefined => state.drafts[uid] ?? state.ws.items.find((i) => i.uid === uid)
+/** A draft with no saved item behind it: made with New or Duplicate, not saved yet. */
+export const isNewDraft = (uid: string) => !!state.drafts[uid] && !state.ws.items.some((i) => i.uid === uid)
+const without = (uid: string) => { const { [uid]: _gone, ...rest } = state.drafts; return rest }
+
+/** Opening another folder replaces everything, drafts included. */
+export function replaceWorkspace(ws: Workspace) { set({ ws, drafts: {}, selected: ws.items[0]?.uid ?? null }); persist() }
 export function select(uid: string | null) { set({ selected: uid }) }
 
-export function addItem(it: Item) { set({ ws: { ...state.ws, items: [...state.ws.items, it] }, selected: it.uid }); persist() }
-export function removeItem(uid: string) {
-  const items = state.ws.items.filter((i) => i.uid !== uid)
-  set({ ws: { ...state.ws, items }, selected: state.selected === uid ? (items[0]?.uid ?? null) : state.selected }); persist()
-}
+/** A new item starts as a draft: it joins the list when saved. */
+export function addItem(it: Item) { set({ drafts: { ...state.drafts, [it.uid]: it }, selected: it.uid }); persist() }
+/** Changes go to the item's draft, made from the saved item on the first change. */
 export function updateItem(uid: string, fn: (it: Item) => Item) {
-  set({ ws: { ...state.ws, items: state.ws.items.map((i) => (i.uid === uid ? fn(i) : i)) } }); persist()
+  const base = current(uid)
+  if (!base) return
+  set({ drafts: { ...state.drafts, [uid]: fn(base) } }); persist()
 }
 export const patchEntry = (uid: string, patch: Partial<Entry>) => updateItem(uid, (it) => ({ ...it, entry: { ...it.entry, ...patch } }))
+
+/** The draft becomes the saved item (a new one goes at the end of its kind's list). */
+export function saveDraft(uid: string) {
+  const d = state.drafts[uid]
+  if (!d) return
+  const exists = state.ws.items.some((i) => i.uid === uid)
+  const items = exists ? state.ws.items.map((i) => (i.uid === uid ? d : i)) : [...state.ws.items, d]
+  set({ ws: { ...state.ws, items }, drafts: without(uid) }); persist()
+}
+/** Throw the draft away: an edited item goes back to how it was saved, a new one is gone. */
+export function discardDraft(uid: string) {
+  const fresh = isNewDraft(uid)
+  set({ drafts: without(uid), selected: fresh && state.selected === uid ? null : state.selected }); persist()
+}
+/** Delete an item: its saved version and any draft. */
+export function removeItem(uid: string) {
+  const i = state.ws.items.findIndex((x) => x.uid === uid)
+  const items = state.ws.items.filter((x) => x.uid !== uid)
+  const next = state.selected === uid ? (i >= 0 ? items[Math.min(i, items.length - 1)]?.uid ?? null : null) : state.selected
+  set({ ws: { ...state.ws, items }, drafts: without(uid), selected: next }); persist()
+}
 export function moveItem(uid: string, by: -1 | 1) {
   const items = [...state.ws.items]
   const i = items.findIndex((x) => x.uid === uid)

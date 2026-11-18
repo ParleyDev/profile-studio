@@ -60,13 +60,60 @@ export function assetId(key: string, kind: Kind) {
 /** "a_hint_of_clove" → "A Hint Of Clove" (assets.rs display_name): the name Parley shows when an entry has none. */
 export const displayName = (stem: string) => stem.split(/[_\- ]/).filter(Boolean).map((w) => w[0].toUpperCase() + w.slice(1)).join(' ')
 
-/** A file name made safe for Parley, keeping its extension. */
-export function safeFileName(name: string) {
+// --- names: what Parley's Import takes, and what an assets folder on disk takes ----------------------------------------
+
+/*
+ * Parley serves whatever is in its assets folder, so a file copied in can be named almost anything. Its Import is
+ * stricter (asset_admin.rs clean_file_name): letters, digits, '.', '_' and '-' only, files up to 8 MB. The Studio
+ * checks against the rules below: characters you allow are warnings (Import would refuse them), unless you say you
+ * use Import, when they are errors again.
+ */
+export interface Rules {
+  /** Characters allowed in names beyond letters, digits, '.', '_' and '-'. */
+  extraChars: string
+  /** Checking for Parley's Import: what it refuses is an error, not a warning. */
+  strictImport: boolean
+  /** Files bigger than this (MB) get a warning. */
+  maxFileMB: number
+}
+/** The extra characters Parley's own assets folder uses in names. */
+export const DEFAULT_EXTRA_CHARS = " !&'(),"
+export const DEFAULT_RULES: Rules = { extraChars: DEFAULT_EXTRA_CHARS, strictImport: false, maxFileMB: 8 }
+/** Never allowed: they break paths, or some systems refuse them in file names. */
+export const BANNED_CHARS = '/\\:*?"<>|'
+const BASE_FILE = /[A-Za-z0-9._-]/, BASE_FOLDER = /[A-Za-z0-9_-]/
+// eslint-disable-next-line no-control-regex
+const control = (c: string) => /[\u0000-\u001f\u007f]/.test(c)
+
+/** The extra characters a rule allows, cleaned: each once, none banned, none already allowed. */
+export const cleanExtras = (s: string) => [...new Set(s)].filter((c) => !BASE_FILE.test(c) && !BANNED_CHARS.includes(c) && !control(c)).join('')
+
+/** How a file or folder name fares: fine everywhere, fine on disk but refused by Import, or not usable. */
+export interface NameVerdict { level: 'ok' | 'import' | 'bad'; chars: string[]; reason?: string }
+export function checkName(name: string, folder: boolean, rules: Rules = DEFAULT_RULES): NameVerdict {
+  if (!name) return { level: 'bad', chars: [], reason: 'empty' }
+  if (name.length > 100) return { level: 'bad', chars: [], reason: 'longer than 100 characters' }
+  if (name.startsWith('.')) return { level: 'bad', chars: ['.'], reason: 'starts with a dot' }
+  if (name !== name.trim()) return { level: 'bad', chars: [' '], reason: 'starts or ends with a space' }
+  const odd = [...new Set([...name].filter((c) => !(folder ? BASE_FOLDER : BASE_FILE).test(c)))]
+  if (!odd.length) return { level: 'ok', chars: [] }
+  const allowed = cleanExtras(rules.extraChars)
+  const bad = odd.filter((c) => !allowed.includes(c) || BANNED_CHARS.includes(c) || control(c))
+  return bad.length ? { level: 'bad', chars: bad } : { level: 'import', chars: odd }
+}
+
+/** A file name made safe, keeping its extension: characters the rules don't allow become '_'. Strict by default. */
+export function safeFileName(name: string, extra = '') {
+  const ok = cleanExtras(extra)
   const ext = extOf(name)
-  const stem = (ext ? name.slice(0, -(ext.length + 1)) : name).replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^[._]+/, '').slice(0, 90) || 'file'
+  const raw = ext ? name.slice(0, -(ext.length + 1)) : name
+  const stem = [...raw].map((c) => (BASE_FILE.test(c) || ok.includes(c) ? c : '\0')).join('').replace(/\0+/g, '_').trim().replace(/^[._]+/, '').slice(0, 90) || 'file'
   return ext ? `${stem}.${ext}` : stem
 }
-export const safeFolderName = (name: string) => name.replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 100) || 'item'
+export const safeFolderName = (name: string, extra = '') => {
+  const ok = cleanExtras(extra)
+  return [...name].map((c) => (BASE_FOLDER.test(c) || ok.includes(c) ? c : '\0')).join('').replace(/\0+/g, '_').trim().replace(/^[_.]+|_+$/g, '').slice(0, 100) || 'item'
+}
 
 export const isVideo = (name: string) => ['webm', 'mp4'].includes(extOf(name))
 export function mimeOf(name: string) {

@@ -5,7 +5,7 @@ import { readZip, writeZip } from '../format/zip'
 export const fromInput = (list: FileList | null): FolderFile[] => [...(list ?? [])].map((f) => ({ path: f.webkitRelativePath || f.name, blob: typed(f, f.name) }))
 
 /** Whatever was dropped: folders (read whole), zips (opened) and loose files. */
-export async function fromDrop(dt: DataTransfer): Promise<FolderFile[]> {
+export async function fromDrop(dt: DataTransfer, onCount?: (n: number) => void): Promise<FolderFile[]> {
   const out: FolderFile[] = []
   const entries = [...dt.items].map((i) => i.webkitGetAsEntry?.()).filter((e): e is FileSystemEntry => !!e)
   const file = (e: FileSystemFileEntry) => new Promise<File>((res, rej) => e.file(res, rej))
@@ -14,6 +14,7 @@ export async function fromDrop(dt: DataTransfer): Promise<FolderFile[]> {
       const f = await file(e as FileSystemFileEntry)
       if (/\.zip$/i.test(f.name)) out.push(...(await readZip(f)))
       else out.push({ path: `${path}${f.name}`, blob: typed(f, f.name) })
+      onCount?.(out.length)
       return
     }
     const reader = (e as FileSystemDirectoryEntry).createReader()
@@ -52,10 +53,12 @@ export const canSaveToFolder = () => typeof (window as { showDirectoryPicker?: u
  * Write the workspace into a folder you pick: each kind's folder and metadata.json, and the files. Files already
  * there with the same name are replaced; nothing else in the folder is touched.
  */
-export async function saveToFolder(ws: Workspace): Promise<number | null> {
+export async function saveToFolder(ws: Workspace, onProgress?: (done: number, total: number) => void): Promise<number | null> {
   let root: DirHandle
   try { root = await (window as unknown as { showDirectoryPicker(o: object): Promise<DirHandle> }).showDirectoryPicker({ mode: 'readwrite', id: 'parley-assets' }) } catch { return null }
   const files = writeFolder(ws)
+  let done = 0
+  onProgress?.(0, files.length)
   for (const f of files) {
     const parts = f.path.split('/')
     let dir: DirHandle = root
@@ -64,6 +67,7 @@ export async function saveToFolder(ws: Workspace): Promise<number | null> {
     const w = await (h as FileSystemFileHandle & { createWritable(): Promise<FileSystemWritableFileStream> }).createWritable()
     await w.write(f.blob)
     await w.close()
+    onProgress?.(++done, files.length)
   }
   return files.length
 }

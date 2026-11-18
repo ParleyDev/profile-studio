@@ -1,11 +1,18 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { isVideo } from '../format/kinds'
 import type { Sizes } from '../format/validate'
 
-/** Object URLs for a set of files, made once per Blob and revoked when it goes. */
+/**
+ * Object URLs for a set of files, revoked when the set changes or the component goes. They are made inside the effect
+ * that revokes them: made during render (useMemo), StrictMode's extra effect run would revoke URLs still in use.
+ */
 export function useFileUrls(files: Record<string, Blob>): Record<string, string> {
-  const urls = useMemo(() => Object.fromEntries(Object.entries(files).map(([n, b]) => [n, URL.createObjectURL(b)])), [files])
-  useEffect(() => () => Object.values(urls).forEach((u) => URL.revokeObjectURL(u)), [urls])
+  const [urls, setUrls] = useState<Record<string, string>>({})
+  useEffect(() => {
+    const made = Object.fromEntries(Object.entries(files).map(([n, b]) => [n, URL.createObjectURL(b)]))
+    setUrls(made)
+    return () => Object.values(made).forEach((u) => URL.revokeObjectURL(u))
+  }, [files])
   return urls
 }
 

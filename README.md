@@ -19,6 +19,12 @@ npm run dev
    are yellow.
 3. **Export zip** (`parley-assets.zip`), then in Parley go to **Admin → Cosmetics → Import** and pick it (or its
    unzipped folder). In Chrome/Edge, **Save to folder** writes straight into a folder instead.
+4. Or **Publish**: **Sign in with Parley** (Parley's own sign-in and approval page opens in a popup; the Studio only
+   gets access to the instance's cosmetics, and never sees your password), **Compare**, then **Publish** the new and
+   changed items. Nothing there is deleted. Your account must be able to manage the instance, and the instance needs
+   the `cosmetics.manage` app permission (Parley's OAuth for third-party apps). Serve the Studio over https, on
+   localhost, or on a private network address so Parley accepts it as a return address. What was published is
+   remembered per instance, so later comparisons only download files you changed.
 
 ## The format
 

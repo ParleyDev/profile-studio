@@ -64,11 +64,26 @@ try {
   await page.locator('[data-open-folder-input]').setInputFiles(assets)
   await page.locator('[data-row-key="blue_ring.png"]').waitFor()
   check(await page.locator('[data-row-key="sparkle"]').count() === 1, 'opened folder lists the decoration and the effect')
+  check(await page.locator('[data-gallery="decoration"] [data-gallery-card]').count() === 1, 'opening lands on a gallery of the first kind')
+  await page.keyboard.press('/')
+  await page.keyboard.type('spark')
+  check(await page.locator('[data-item-row]').count() === 1, 'search narrows the list')
+  await page.keyboard.press('Escape')
+  await page.locator('[data-search]').fill('')
+  await page.keyboard.press('ArrowDown')
+  check(await page.locator('[data-item-editor]').count() === 1, 'arrow keys open items')
 
   // Edit the decoration.
   await page.locator('[data-row-key="blue_ring.png"]').click()
   await page.locator('[data-item-name]').fill('Bluer Ring')
   check(await page.locator('[data-item-title]').textContent() === 'Bluer Ring', 'renaming shows in the editor')
+  check(await page.locator('[data-draft-bar="edited"]').count() === 1 && (await page.locator('[data-row-key="blue_ring.png"]').textContent()).includes('Blue Ring'), 'edits are a draft; the list keeps the saved name')
+  await page.locator('[data-draft-save]').click()
+  check((await page.locator('[data-row-key="blue_ring.png"]').textContent()).includes('Bluer Ring') && await page.locator('[data-draft-bar]').count() === 0, 'saving the draft updates the list')
+  // Previews load their pictures (blob URLs alive, not revoked by StrictMode's extra effect run).
+  await page.waitForFunction(() => [...document.querySelectorAll('img[src^="blob:"]')].some((i) => i.complete && i.naturalWidth > 0), null, { timeout: 5000 }).catch(() => {})
+  const loaded = await page.locator('img[src^="blob:"]').evaluateAll((imgs) => imgs.length > 0 && imgs.every((i) => i.complete && i.naturalWidth > 0))
+  check(loaded, 'previews load their pictures')
 
   // A new frame from a dropped-in picture.
   await page.locator('[data-new]').click()
@@ -76,6 +91,9 @@ try {
   await page.locator('[data-item-name]').fill('Pink Staple')
   await page.locator('[data-item-add-files] input[type=file]').setInputFiles(framePic)
   await page.locator('[data-layer="0"]').waitFor()
+  check(await page.locator('[data-row-key="new_frame_1"]').count() === 0 && await page.locator('[data-draft-bar="new"]').count() === 1, 'a new item stays out of the list until saved')
+  await page.keyboard.press('Control+s')
+  await page.locator('[data-row-key="new_frame_1"]').waitFor()
   check(await page.locator('[data-layer-frame="anchor"]').inputValue() === 'top', 'frame layer placed from its file name')
   await page.screenshot({ path: join(out, 'frame.png'), fullPage: true })
 
@@ -97,11 +115,35 @@ try {
   const frame = (await json('profile-frames/metadata.json')).items[0]
   check(frame.folder === 'new_frame_1' && frame.layout?.inner_width === 1200 && frame.layers[0].type === 'staple', 'new frame written with layout and layer')
 
-  // Autosave: a reload brings the work back.
+  // Templates: a kind's pack downloads as a zip with every format.
+  await page.locator('[data-open-templates]').click()
+  const [tdl] = await Promise.all([page.waitForEvent('download'), page.locator('[data-template-get="decoration"]').click()])
+  const tzip = join(out, tdl.suggestedFilename())
+  await tdl.saveAs(tzip)
+  const tfiles = (await readZip(new Blob([readFileSync(tzip)]))).map((f) => f.path)
+  check(['README.md', 'decoration.psd', 'decoration.svg', 'guides.png', 'motion.json'].every((n) => tfiles.includes(`parley-decoration-template/${n}`)), 'decoration template pack has PSD, SVG, PNG, motion spec and README')
+
+  // A PNG sequence becomes an animated decoration.
+  const frames = [[255, 80, 80], [80, 255, 80], [80, 80, 255]].map((c, i) => { const p = join(out, `frame_${i + 1}.png`); writeFileSync(p, png(96, 96, c)); return p })
+  await page.locator('[data-new]').click()
+  await page.locator('[data-new-kind="decoration"]').click()
+  await page.locator('[data-assemble-input]').setInputFiles(frames)
+  await page.locator('[data-assemble-run]').click()
+  await page.locator('[data-assemble-result]').waitFor({ timeout: 30000 })
+  await page.locator('[data-assemble-use]').click()
+  await page.waitForTimeout(500)
+  check(/animation\.png/.test(await page.locator('[data-item-file]').textContent()) && (await page.locator('[data-item-file]').textContent()).includes('animated'), 'a PNG sequence becomes an animated PNG')
+  await page.keyboard.press('Control+s')
+  await page.locator('[data-row-key="animation.png"]').waitFor()
+
+  // Autosave: a reload brings the work back, unsaved drafts included.
+  await page.locator('[data-row-key="sparkle"]').click()
+  await page.locator('[data-item-name]').fill('Sparkle draft')
   await page.waitForSelector('[data-saved="saved"]')
   await page.reload()
   await page.locator('[data-row-key="new_frame_1"]').waitFor()
   check(true, 'work restored after reload')
+  check((await page.locator('[data-drafts]').textContent()).includes('1') && (await page.locator('[data-row-key="sparkle"]').textContent()).includes('Sparkle') && await page.locator('[data-row-key="sparkle"] [data-row-edited]').count() === 1, 'unsaved drafts survive a reload')
   check(errors.length === 0, `no page errors${errors.length ? `: ${errors.join('; ')}` : ''}`)
 } finally {
   await browser.close()
