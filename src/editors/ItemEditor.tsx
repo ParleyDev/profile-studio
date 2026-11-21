@@ -1,6 +1,6 @@
 import { ArrowDown, ArrowUp, Copy, Timer, Trash2 } from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { assetId, displayName, DEFAULT_LAYOUT, EFFECT_SPECIAL_FILES, extOf, FILE_EXTS, KIND_DIRS, KIND_LABELS, layered, MAX_DESCRIPTION, MAX_LAYOUT, MAX_MS, MAX_NAME, MAX_Z, newEffectLayer, newFrameLayer, safeFileName, safeFolderName, isVideo, type EffectLayer, type FrameLayer, type FrameLayout } from '../format/kinds'
+import { assetId, displayName, DEFAULT_LAYOUT, EFFECT_SPECIAL_FILES, extOf, FILE_EXTS, KIND_DIRS, layered, MAX_DESCRIPTION, MAX_LAYOUT, MAX_MS, MAX_NAME, MAX_Z, newEffectLayer, newFrameLayer, safeFileName, safeFolderName, isVideo, type EffectLayer, type FrameLayer, type FrameLayout } from '../format/kinds'
 import { validateItem, type Problem } from '../format/validate'
 import { keyOf, newUid, typed, type Item } from '../format/workspace'
 import { animationLength, isAnimated, useFileUrls, useSizes } from '../lib/media'
@@ -13,9 +13,42 @@ import NameplatePreview from '../preview/NameplatePreview'
 import { DropFiles, Field, fmtSize, Num, Problems } from './Fields'
 import { OptimizeButton } from './Optimize'
 import { AssembleButton } from './Assemble'
+import PublishOne from '../components/PublishOne'
 
 const accept = (exts: string[]) => exts.map((e) => `.${e}`).join(',')
 const stem = (f: string) => (f.includes('.') ? f.slice(0, f.lastIndexOf('.')) : f)
+
+/**
+ * The item's title and actions, for the bar that stays at the top while its fields scroll.
+ */
+export function ItemHeader({ item, onSignIn }: { item: Item; onSignIn: () => void }) {
+  const { ws, drafts } = useStudio()
+  const key = keyOf(item)
+  const field = layered(item.kind) ? 'folder' : 'file'
+  const duplicate = () => {
+    const taken = new Set([...ws.items, ...Object.values(drafts)].filter((o) => o.kind === item.kind).map(keyOf))
+    let k = key, n = 2
+    const make = (i: number) => (layered(item.kind) ? `${key}_${i}` : `${stem(key)}_${i}.${extOf(key)}`)
+    while (taken.has(k)) k = make(n++)
+    const files = layered(item.kind) ? { ...item.files } : item.files[key] ? { [k]: item.files[key] } : {}
+    addItem({ uid: newUid(), kind: item.kind, entry: { ...structuredClone(item.entry), [field]: k, name: `${item.entry.name ?? ''} copy`.trim().slice(0, MAX_NAME) }, files })
+  }
+  return (
+    <div className="flex min-w-0 flex-1 flex-wrap items-center justify-between gap-x-3 gap-y-1">
+      <div className="min-w-0">
+        <h1 className="truncate text-xl font-bold leading-tight" data-item-title>{(item.entry.name as string) || 'Untitled'}</h1>
+        <div className="truncate font-mono text-xs text-text-2" title="What Parley stores for a member wearing it">{key ? `${KIND_DIRS[item.kind]}/${key} · asset:${assetId(key, item.kind)}` : `${KIND_DIRS[item.kind]}/`}</div>
+      </div>
+      <div className="flex items-center gap-1">
+        <PublishOne uid={item.uid} onSignIn={onSignIn} />
+        <button type="button" className="btn-ghost !px-2" title="Move up (pickers show them in this order)" onClick={() => moveItem(item.uid, -1)}><ArrowUp size={16} /></button>
+        <button type="button" className="btn-ghost !px-2" title="Move down" onClick={() => moveItem(item.uid, 1)}><ArrowDown size={16} /></button>
+        <button type="button" className="btn-ghost !px-2" title="Duplicate" onClick={duplicate} data-item-duplicate><Copy size={16} /></button>
+        <button type="button" className="btn-ghost !px-2 hover:!text-danger" title="Delete" onClick={() => { if (confirm(`Delete ${item.entry.name || 'this item'}?`)) removeItem(item.uid) }} data-item-delete><Trash2 size={16} /></button>
+      </div>
+    </div>
+  )
+}
 
 export default function ItemEditor({ item }: { item: Item }) {
   const { ws } = useStudio()
@@ -25,34 +58,10 @@ export default function ItemEditor({ item }: { item: Item }) {
   const view = useMemo(() => ({ ...ws, items: ws.items.some((i) => i.uid === item.uid) ? ws.items.map((i) => (i.uid === item.uid ? item : i)) : [...ws.items, item] }), [ws, item])
   const problems = useMemo(() => validateItem(item, view, sizes, undefined, rules), [item, view, sizes, rules])
   const key = keyOf(item)
-  const field = layered(item.kind) ? 'folder' : 'file'
   const general = problems.filter((p) => !p.at?.startsWith('layer:') && !p.at?.startsWith('file:'))
-
-  const duplicate = () => {
-    const taken = new Set(view.items.filter((o) => o.kind === item.kind).map(keyOf))
-    let k = key, n = 2
-    const make = (i: number) => (layered(item.kind) ? `${key}_${i}` : `${stem(key)}_${i}.${extOf(key)}`)
-    while (taken.has(k)) k = make(n++)
-    const files = layered(item.kind) ? { ...item.files } : item.files[key] ? { [k]: item.files[key] } : {}
-    addItem({ uid: newUid(), kind: item.kind, entry: { ...structuredClone(item.entry), [field]: k, name: `${item.entry.name ?? ''} copy`.trim().slice(0, MAX_NAME) }, files })
-  }
 
   const head = (
     <>
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <div className="text-xs font-bold uppercase tracking-wider text-text-2">{KIND_LABELS[item.kind].one}</div>
-          <h1 className="text-2xl font-bold" data-item-title>{(item.entry.name as string) || 'Untitled'}</h1>
-          <div className="mt-0.5 font-mono text-xs text-text-2" title="What Parley stores for a member wearing it">{key ? `${KIND_DIRS[item.kind]}/${key} · asset:${assetId(key, item.kind)}` : `${KIND_DIRS[item.kind]}/`}</div>
-        </div>
-        <div className="flex gap-1">
-          <button type="button" className="btn-ghost !px-2" title="Move up (pickers show them in this order)" onClick={() => moveItem(item.uid, -1)}><ArrowUp size={16} /></button>
-          <button type="button" className="btn-ghost !px-2" title="Move down" onClick={() => moveItem(item.uid, 1)}><ArrowDown size={16} /></button>
-          <button type="button" className="btn-ghost !px-2" title="Duplicate" onClick={duplicate} data-item-duplicate><Copy size={16} /></button>
-          <button type="button" className="btn-ghost !px-2 hover:!text-danger" title="Delete" onClick={() => { if (confirm(`Delete ${item.entry.name || 'this item'}?`)) removeItem(item.uid) }} data-item-delete><Trash2 size={16} /></button>
-        </div>
-      </div>
-
       <Problems list={general} />
 
       <div className="grid gap-4 sm:grid-cols-2">
@@ -87,7 +96,7 @@ function Split({ form, preview }: { form: ReactNode; preview: ReactNode }) {
     <div className="@container">
       <div className="grid gap-6 @4xl:grid-cols-[minmax(0,1fr)_minmax(0,46%)] @4xl:items-start">
         <div className="@container min-w-0 space-y-6">{form}</div>
-        <aside className="min-w-0 space-y-3 @4xl:sticky @4xl:top-16 @4xl:max-h-[calc(100dvh-9rem)] @4xl:overflow-y-auto" data-item-preview>
+        <aside className="min-w-0 space-y-3 @4xl:sticky @4xl:top-[calc(var(--bar,0px)+1rem)] @4xl:max-h-[calc(var(--main-h,100dvh)-var(--bar,0px)-2rem)] @4xl:overflow-y-auto" data-item-preview>
           <div className="label">Preview</div>
           {preview}
         </aside>

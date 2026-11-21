@@ -15,7 +15,9 @@ const DB = 'parley-profile-studio', VERSION = 3
 const LEGACY = 'workspace', META = 'meta', ITEMS = 'items', BLOBS = 'blobs', DRAFTS = 'drafts'
 
 interface ItemRec { uid: string; kind: Kind; entry: Entry; files: Record<string, string> }
-interface MetaRec { order: string[]; extras: Workspace['extras'] }
+interface MetaRec { order: string[]; extras: Workspace['extras']; marks?: Marks }
+/** Items a merge or pull brought in or changed, by uid, until you clear them. */
+export type Marks = Record<string, 'new' | 'updated'>
 
 let dbp: Promise<IDBDatabase> | null = null
 function db(): Promise<IDBDatabase> {
@@ -48,6 +50,7 @@ interface State {
    * moves a draft into the workspace, Discard drops it.
    */
   drafts: Record<string, Item>
+  marks: Marks
   selected: string | null
   loaded: boolean
   saved: Saved
@@ -58,7 +61,7 @@ interface State {
   /** Work that blocks the page: opening the last workspace, reading a folder. */
   busy: Progress | null
 }
-let state: State = { ws: emptyWorkspace(), drafts: {}, selected: null, loaded: false, saved: 'saved', saveError: null, saving: null, busy: null }
+let state: State = { ws: emptyWorkspace(), drafts: {}, marks: {}, selected: null, loaded: false, saved: 'saved', saveError: null, saving: null, busy: null }
 const listeners = new Set<() => void>()
 const set = (next: Partial<State>) => { state = { ...state, ...next }; listeners.forEach((l) => l()) }
 const subscribe = (l: () => void) => { listeners.add(l); return () => { listeners.delete(l) } }
@@ -79,7 +82,7 @@ const blobId = (b: Blob) => {
 const savedItems = new Map<string, Item>()
 const savedDrafts = new Map<string, Item>()
 const savedBlobs = new Set<string>()
-let savedMeta: { order: string[]; extras: Workspace['extras'] } | null = null
+let savedMeta: { order: string[]; extras: Workspace['extras']; marks: Marks } | null = null
 
 let timer: number | undefined
 let flushing = false, again = false
@@ -131,20 +134,21 @@ async function flush() {
       await write()
 
       const order = ws.items.map((i) => i.uid)
-      const metaChanged = !savedMeta || savedMeta.extras !== ws.extras || savedMeta.order.length !== order.length || savedMeta.order.some((u, i) => u !== order[i])
+      const marks = state.marks
+      const metaChanged = !savedMeta || savedMeta.extras !== ws.extras || savedMeta.marks !== marks || savedMeta.order.length !== order.length || savedMeta.order.some((u, i) => u !== order[i])
       if (changed.length || removed.length || metaChanged || dChanged.length || dRemoved.length) {
         await tx([ITEMS, META, DRAFTS], (t) => {
           for (const it of changed) t.objectStore(ITEMS).put(record(it), it.uid)
           for (const u of removed) t.objectStore(ITEMS).delete(u)
           for (const d of dChanged) t.objectStore(DRAFTS).put(record(d), d.uid)
           for (const u of dRemoved) t.objectStore(DRAFTS).delete(u)
-          if (metaChanged) t.objectStore(META).put({ order, extras: ws.extras } satisfies MetaRec, 'ws')
+          if (metaChanged) t.objectStore(META).put({ order, extras: ws.extras, marks } satisfies MetaRec, 'ws')
         })
         for (const it of changed) savedItems.set(it.uid, it)
         for (const u of removed) savedItems.delete(u)
         for (const d of dChanged) savedDrafts.set(d.uid, d)
         for (const u of dRemoved) savedDrafts.delete(u)
-        savedMeta = { order, extras: ws.extras }
+        savedMeta = { order, extras: ws.extras, marks }
       }
 
       // Files nothing uses any more.
@@ -209,10 +213,10 @@ export async function restore() {
     }
     const drafts: Record<string, Item> = {}
     for (const r of draftRecs) { const d = fromRec(r); drafts[d.uid] = d; savedDrafts.set(d.uid, d) }
-    savedMeta = { order: meta.order, extras: meta.extras }
     const ws: Workspace = { items, extras: meta.extras ?? {} }
-    savedMeta.extras = ws.extras
-    set({ ws, drafts, selected: items[0]?.uid ?? null })
+    const marks = meta.marks ?? {}
+    savedMeta = { order: meta.order, extras: ws.extras, marks }
+    set({ ws, drafts, marks, selected: items[0]?.uid ?? null })
     // Records or files left over from an interrupted save get tidied by the next save.
     if (recs.length !== items.length || blobKeys.length) persist()
   } catch {
@@ -231,7 +235,25 @@ export const isNewDraft = (uid: string) => !!state.drafts[uid] && !state.ws.item
 const without = (uid: string) => { const { [uid]: _gone, ...rest } = state.drafts; return rest }
 
 /** Opening another folder replaces everything, drafts included. */
-export function replaceWorkspace(ws: Workspace) { set({ ws, drafts: {}, selected: ws.items[0]?.uid ?? null }); persist() }
+export function replaceWorkspace(ws: Workspace) { set({ ws, drafts: {}, marks: {}, selected: ws.items[0]?.uid ?? null }); persist() }
+
+/**
+ * Merge items in: each `{ replace, item }` takes the place of the saved item with uid `replace` (keeping that uid,
+ * its place and any draft), and each `{ item }` is added at the end. They're marked until the marks are cleared.
+ */
+export function mergeItems(changes: { replace?: string; item: Item }[], extras: Workspace['extras'] = {}) {
+  const marks = { ...state.marks }
+  const by = new Map<string, Item>()
+  for (const c of changes) if (c.replace) by.set(c.replace, { ...c.item, uid: c.replace })
+  const items = state.ws.items.map((i) => by.get(i.uid) ?? i)
+  for (const uid of by.keys()) if (marks[uid] !== 'new') marks[uid] = 'updated'
+  for (const c of changes) if (!c.replace) { items.push(c.item); marks[c.item.uid] = 'new' }
+  // The open folder's own settings (item_count, say) win over the incoming ones.
+  const ex: Workspace['extras'] = { ...state.ws.extras }
+  for (const k of Object.keys(extras) as Kind[]) ex[k] = { ...extras[k], ...state.ws.extras[k] }
+  set({ ws: { items, extras: ex }, marks, selected: state.selected ?? changes[0]?.item.uid ?? null }); persist()
+}
+export function clearMarks() { set({ marks: {} }); persist() }
 export function select(uid: string | null) { set({ selected: uid }) }
 
 /** A new item starts as a draft: it joins the list when saved. */
@@ -262,7 +284,8 @@ export function removeItem(uid: string) {
   const i = state.ws.items.findIndex((x) => x.uid === uid)
   const items = state.ws.items.filter((x) => x.uid !== uid)
   const next = state.selected === uid ? (i >= 0 ? items[Math.min(i, items.length - 1)]?.uid ?? null : null) : state.selected
-  set({ ws: { ...state.ws, items }, drafts: without(uid), selected: next }); persist()
+  const { [uid]: _m, ...marks } = state.marks
+  set({ ws: { ...state.ws, items }, drafts: without(uid), marks, selected: next }); persist()
 }
 export function moveItem(uid: string, by: -1 | 1) {
   const items = [...state.ws.items]

@@ -61,12 +61,20 @@ try {
   await page.goto(url)
   await page.locator('[data-welcome]').waitFor()
 
+  // The sidebar's groups are an accordion: open a kind's group to see its rows.
+  const show = async (kind) => { const t = page.locator(`[data-kind-toggle="${kind}"]`); if (await t.getAttribute('aria-expanded') !== 'true') await t.click() }
   await page.locator('[data-open-folder-input]').setInputFiles(assets)
+  await page.locator('[data-gallery]').waitFor()
+  check(await page.locator('[data-kind-toggle][aria-expanded="true"]').count() === 0, 'a newly opened folder starts with its groups collapsed')
+  await show('effect')
+  check(await page.locator('[data-row-key="sparkle"]').count() === 1 && await page.locator('[data-row-key="blue_ring.png"]').count() === 0, 'groups open one at a time')
+  await show('decoration')
   await page.locator('[data-row-key="blue_ring.png"]').waitFor()
-  check(await page.locator('[data-row-key="sparkle"]').count() === 1, 'opened folder lists the decoration and the effect')
+  check(await page.locator('[data-row-key="sparkle"]').count() === 0 && await page.locator('[data-kind-toggle]').count() === 4, 'opening a group closes the other; every header stays')
   check(await page.locator('[data-gallery="decoration"] [data-gallery-card]').count() === 1, 'opening lands on a gallery of the first kind')
   await page.keyboard.press('/')
   await page.keyboard.type('spark')
+  await show('effect')
   check(await page.locator('[data-item-row]').count() === 1, 'search narrows the list')
   await page.keyboard.press('Escape')
   await page.locator('[data-search]').fill('')
@@ -74,6 +82,7 @@ try {
   check(await page.locator('[data-item-editor]').count() === 1, 'arrow keys open items')
 
   // Edit the decoration.
+  await show('decoration')
   await page.locator('[data-row-key="blue_ring.png"]').click()
   await page.locator('[data-item-name]').fill('Bluer Ring')
   check(await page.locator('[data-item-title]').textContent() === 'Bluer Ring', 'renaming shows in the editor')
@@ -137,12 +146,17 @@ try {
   await page.locator('[data-row-key="animation.png"]').waitFor()
 
   // Autosave: a reload brings the work back, unsaved drafts included.
+  await show('effect')
   await page.locator('[data-row-key="sparkle"]').click()
   await page.locator('[data-item-name]').fill('Sparkle draft')
   await page.waitForSelector('[data-saved="saved"]')
   await page.reload()
+  await page.locator('[data-sidebar]').waitFor()
+  // A reload opens with only the open item's group expanded.
+  await show('frame')
   await page.locator('[data-row-key="new_frame_1"]').waitFor()
   check(true, 'work restored after reload')
+  await show('effect')
   check((await page.locator('[data-drafts]').textContent()).includes('1') && (await page.locator('[data-row-key="sparkle"]').textContent()).includes('Sparkle') && await page.locator('[data-row-key="sparkle"] [data-row-edited]').count() === 1, 'unsaved drafts survive a reload')
   check(errors.length === 0, `no page errors${errors.length ? `: ${errors.join('; ')}` : ''}`)
 } finally {

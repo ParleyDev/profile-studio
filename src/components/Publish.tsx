@@ -1,4 +1,4 @@
-import { CheckCircle2, CircleAlert, CloudUpload, Loader2, LogIn, LogOut, RefreshCw, Square } from 'lucide-react'
+import { CheckCircle2, CircleAlert, CloudDownload, CloudUpload, Loader2, LogIn, LogOut, RefreshCw, Square } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { KIND_LABELS } from '../format/kinds'
 import { keyOf } from '../format/workspace'
@@ -12,20 +12,24 @@ function remembered(): string {
   try { return (JSON.parse(localStorage.getItem(REMEMBER) ?? '{}') as { base?: string }).base ?? '' } catch { return '' }
 }
 
-/** Publish the saved items to a Parley instance: sign in, compare, then add the new ones and update the changed ones. */
-export default function Publish() {
+/**
+ * Publish the saved items to a Parley instance (sign in, compare, then add the new ones and update the changed ones),
+ * or pull the instance's items into what's open.
+ */
+export default function Publish({ onPull }: { onPull: (c: Conn) => void }) {
   const c = useConn()
   return (
     <div className="max-w-4xl space-y-6" data-publish>
       <div>
-        <h1 className="text-2xl font-bold">Publish to Parley</h1>
+        <h1 className="text-2xl font-bold">Publish to Parley, or pull from it</h1>
         <p className="mt-1 max-w-2xl text-sm text-text-2">
           Sends your saved items to a Parley instance's assets folder: items it doesn't have are added, and items it has get their
           changes (name, description, layers, layout and changed files). Nothing there is deleted. You need an account that can
-          manage the instance.
+          manage the instance. <b>Pull</b> goes the other way: the instance's items come into what's open, new ones added and changed
+          ones updated, for you to pick first.
         </p>
       </div>
-      {c ? <Connected conn={c} /> : <SignIn />}
+      {c ? <Connected conn={c} onPull={onPull} /> : <SignIn />}
     </div>
   )
 }
@@ -65,7 +69,7 @@ const ACTIONS: { id: Action; title: string; blurb: string }[] = [
   { id: 'same', title: 'Up to date', blurb: 'Nothing to send.' },
 ]
 
-function Connected({ conn: c }: { conn: Conn }) {
+function Connected({ conn: c, onPull }: { conn: Conn; onPull: (c: Conn) => void }) {
   const { ws, drafts } = useStudio()
   const [writable, setWritable] = useState<boolean | null>(null)
   const [rows, setRows] = useState<PlanRow[] | null>(null)
@@ -82,6 +86,8 @@ function Connected({ conn: c }: { conn: Conn }) {
     folderStatus(c).then((s) => { if (live) setWritable(s.writable) }).catch((e: unknown) => { if (live) setError(e instanceof Error ? e.message : String(e)) })
     return () => { live = false; stop.current?.abort() }
   }, [c])
+  // A comparison is of the items as they were: a pull or an edit makes it stale.
+  useEffect(() => { setRows(null); setOutcomes(null) }, [ws.items])
 
   const fail = (e: unknown) => {
     if (e instanceof DOMException && e.name === 'AbortError') return
@@ -126,6 +132,7 @@ function Connected({ conn: c }: { conn: Conn }) {
         <button type="button" className={rows ? 'btn-ghost bg-bg-3' : 'btn-primary'} disabled={!!progress || !ws.items.length} onClick={() => void compare()} data-publish-compare>
           <RefreshCw size={16} />{rows ? 'Compare again' : `Compare ${ws.items.length.toLocaleString()} item${ws.items.length === 1 ? '' : 's'}`}
         </button>
+        <button type="button" className="btn-ghost" disabled={!!progress} onClick={() => onPull(c)} title="Bring the instance's items into what's open: you pick what comes in" data-publish-pull><CloudDownload size={16} />Pull from instance</button>
         {rows && <button type="button" className="btn-primary" disabled={!!progress || !picked.size || writable === false} onClick={() => void send()} data-publish-send><CloudUpload size={16} />Publish {picked.size.toLocaleString()}</button>}
         {progress && <span className="flex items-center gap-2 text-sm text-text-1" data-publish-progress><Loader2 size={14} className="animate-spin" />{progress}<button type="button" className="btn-ghost !px-2 !py-1" onClick={() => stop.current?.abort()} title="Stop"><Square size={12} />Stop</button></span>}
       </div>

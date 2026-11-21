@@ -14,7 +14,9 @@ npm run dev
 ```
 
 1. **Open folder** (an instance's assets folder, or any folder laid out like one), **Open zip**, or drop either onto
-   the page. Or start from **New**.
+   the page. Or start from **New**. Opening one while items are open merges it in: items match by id the way Parley
+   matches them, you pick which new and changed ones come in, and nothing open is removed (or choose **Replace
+   everything instead**). What a merge brings in is marked New or Updated in the list until you clear the marks.
 2. Edit names, descriptions, files, layers and frame layout. Problems Parley would refuse show as red badges; warnings
    are yellow.
 3. **Export zip** (`parley-assets.zip`), then in Parley go to **Admin → Cosmetics → Import** and pick it (or its
@@ -24,7 +26,8 @@ npm run dev
    changed items. Nothing there is deleted. Your account must be able to manage the instance, and the instance needs
    the `cosmetics.manage` app permission (Parley's OAuth for third-party apps). Serve the Studio over https, on
    localhost, or on a private network address so Parley accepts it as a return address. What was published is
-   remembered per instance, so later comparisons only download files you changed.
+   remembered per instance, so later comparisons only download files you changed. **Pull from instance** goes the
+   other way: the instance's assets-folder items are downloaded and merged into what's open, the same way.
 
 ## The format
 
