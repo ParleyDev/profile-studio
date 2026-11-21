@@ -12,6 +12,7 @@
 import { useSyncExternalStore } from 'react'
 import type { Kind } from '../format/kinds'
 import type { Entry } from '../format/workspace'
+import { sha256Bytes } from './sha256'
 
 export const SCOPE = 'cosmetics.manage'
 
@@ -113,7 +114,7 @@ function markApproved(base: string) {
 
 const b64url = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 const random = (n: number) => b64url(crypto.getRandomValues(new Uint8Array(n)))
-const challenge = async (verifier: string) => b64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))))
+const challenge = async (verifier: string) => b64url(await sha256Bytes(new TextEncoder().encode(verifier)))
 
 interface Pending { state: string; verifier: string; base: string; clientId: string; tokenUrl: string; redirect: string }
 const PENDING = 'parley-profile-studio:signin'

@@ -9,6 +9,7 @@
  */
 import { assetId, checkName, KINDS, layered, type Kind } from '../format/kinds'
 import { keyOf, type Item } from '../format/workspace'
+import { hex, sha256Bytes } from './sha256'
 import { editItem, importItem, remoteFile, remoteItems, type Conn, type RemoteItem } from './parley'
 
 export type Action = 'add' | 'update' | 'same' | 'blocked'
@@ -42,7 +43,7 @@ const hashes = new WeakMap<Blob, Promise<string>>()
 export function sha256(b: Blob): Promise<string> {
   let h = hashes.get(b)
   if (!h) {
-    h = b.arrayBuffer().then((buf) => crypto.subtle.digest('SHA-256', buf)).then((d) => [...new Uint8Array(d)].map((x) => x.toString(16).padStart(2, '0')).join(''))
+    h = b.arrayBuffer().then((buf) => sha256Bytes(new Uint8Array(buf))).then(hex)
     hashes.set(b, h)
   }
   return h
@@ -151,8 +152,10 @@ export async function compareFiles(c: Conn, rows: PlanRow[], onProgress: (done: 
 /** Everything publishing needs to know about the instance, compared with these items. */
 export async function plan(c: Conn, items: Item[], onProgress: (label: string, done: number, total: number) => void, signal?: AbortSignal) {
   const remote: Partial<Record<Kind, RemoteItem[]>> = {}
+  // Only the kinds being published: one item reads one list.
+  const kinds = KINDS.filter((k) => items.some((i) => i.kind === k))
   let n = 0
-  for (const k of KINDS) { onProgress('Reading the instance', n++, KINDS.length); remote[k] = await remoteItems(c, k) }
+  for (const k of kinds) { onProgress('Reading the instance', n++, kinds.length); remote[k] = await remoteItems(c, k) }
   const rows = planEntries(items, remote)
   await compareFiles(c, rows, (d, t) => onProgress('Comparing files', d, t), signal)
   return rows
