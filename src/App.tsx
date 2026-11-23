@@ -2,6 +2,7 @@ import { ChevronDown, ChevronLeft, ChevronRight, CloudUpload, Download, FilePen,
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import Gallery from './components/Gallery'
 import Loading, { SaveStatus } from './components/Loading'
+import Bundles from './components/Bundles'
 import Merge, { type MergeSource } from './components/Merge'
 import Publish from './components/Publish'
 import Settings from './components/Settings'
@@ -10,6 +11,8 @@ import Sidebar, { openOnly, visibleItems, type Nav } from './components/Sidebar'
 import ItemEditor, { ItemHeader } from './editors/ItemEditor'
 import { DEFAULT_LAYOUT, KIND_LABELS, KINDS, layered, type Kind } from './format/kinds'
 import { validateWorkspace } from './format/validate'
+import { allTags } from './format/tags'
+import { bundlesOf } from './format/shop'
 import { keyOf, newUid, readFolder, type Entry, type FolderFile, type Item, type Workspace } from './format/workspace'
 import { canSaveToFolder, exportZip, fromDrop, fromInput, fromZip, saveToFolder } from './lib/io'
 import { useRules } from './lib/settings'
@@ -68,7 +71,10 @@ export default function App() {
   const [nav, setNav] = useState<Nav>({ query: '', filter: 'all', collapsed: openOnly(null) })
   const [gallery, setGalleryRaw] = useState<Kind | null>(null)
   /** A page over the items: Settings or Templates. */
-  const [page, setPage] = useState<'settings' | 'templates' | 'publish' | null>(null)
+  const [page, setPage] = useState<'settings' | 'templates' | 'publish' | 'bundles' | null>(null)
+  // The bundle open on the Bundles page (null: all of them).
+  const [bundle, setBundle] = useState<string | null>(null)
+  const showBundles = useCallback((id: string | null = null) => { setBundle(id); setPage('bundles') }, [])
   const setGallery = useCallback((k: Kind | null) => { setGalleryRaw(k); setPage(null) }, [])
   const rules = useRules()
   const folderInput = useRef<HTMLInputElement>(null)
@@ -76,6 +82,8 @@ export default function App() {
   const searchRef = useRef<HTMLInputElement>(null)
   const problems = useMemo(() => validateWorkspace(ws, rules), [ws, rules])
   const shown = useMemo(() => visibleItems(ws.items, problems, nav, marks), [ws.items, problems, nav, marks])
+  const tagList = useMemo(() => allTags(ws.items), [ws.items])
+  const bundleCount = useMemo(() => bundlesOf(ws).length, [ws])
   const totals = useMemo(() => new Map(KINDS.map((k) => [k, ws.items.filter((i) => i.kind === k).length])), [ws.items])
   const item = (selected && drafts[selected]) || ws.items.find((i) => i.uid === selected) || null
   const draftList = Object.values(drafts)
@@ -174,7 +182,7 @@ export default function App() {
       load: async (onProgress) => {
         const s = getState()
         const rows = await planMerge(s.ws.items, s.drafts, workspace.items, (d, t) => onProgress('Comparing', d, t))
-        return { rows, notes, extras: workspace.extras }
+        return { rows, notes, extras: workspace.extras, bundles: workspace.bundles, format: workspace.format, localBundles: workspace.localBundles }
       },
       onReplace: replace,
     })
@@ -245,7 +253,7 @@ export default function App() {
       onDragLeave={(e) => { if (!e.relatedTarget || !e.currentTarget.contains(e.relatedTarget as Node)) setDragging(false) }}
       onDrop={onDrop}
     >
-      <header className="flex flex-wrap items-center gap-2 border-b border-line bg-bg-1 px-4 py-2">
+      <header className="relative z-30 flex flex-wrap items-center gap-2 border-b border-line bg-bg-1 px-4 py-2">
         <div className="mr-2 font-bold">Profile Studio <span className="text-xs font-normal text-text-2">for Parley</span></div>
         <input ref={folderInput} type="file" className="hidden" multiple {...{ webkitdirectory: '' }} onChange={(e) => { const f = fromInput(e.target.files); e.target.value = ''; void openFiles(async () => f, 'Reading files', 'the folder') }} data-open-folder-input />
         <input ref={zipInput} type="file" className="hidden" accept=".zip" onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) void openFiles(() => fromZip(f), 'Opening the zip', f.name) }} data-open-zip-input />
@@ -300,7 +308,7 @@ export default function App() {
 
       <div className="flex min-h-0 flex-1">
         {ws.items.length > 0 && (
-          <Sidebar items={shown} total={totals} problems={problems} nav={nav} setNav={setNav} selected={selected} galleryKind={page ? null : gallery} edited={drafts} marks={marks} onClearMarks={clearMarks} onSelect={open} onGallery={setGallery} onNew={create} searchRef={searchRef} />
+          <Sidebar items={shown} total={totals} problems={problems} nav={nav} setNav={setNav} selected={selected} galleryKind={page ? null : gallery} edited={drafts} marks={marks} onClearMarks={clearMarks} tags={tagList} onSelect={open} onGallery={setGallery} onNew={create} searchRef={searchRef} bundleCount={bundleCount} bundlesOpen={page === 'bundles'} onBundles={() => showBundles(null)} />
         )}
         <main ref={mainRef} className="min-w-0 flex-1 overflow-y-auto" data-main>
           {item && !page && !gallery && (
@@ -335,10 +343,12 @@ export default function App() {
               <Templates />
             ) : page === 'publish' ? (
               <Publish onPull={pull} />
+            ) : page === 'bundles' ? (
+              <Bundles open={bundle} onOpenBundle={setBundle} onOpenItem={open} />
             ) : gallery ? (
-              <Gallery kind={gallery} items={shown.get(gallery)!} total={totals.get(gallery) ?? 0} problems={problems} marks={marks} onOpen={open} onNew={() => create(gallery)} />
+              <Gallery key={gallery} kind={gallery} items={shown.get(gallery)!} total={totals.get(gallery) ?? 0} problems={problems} marks={marks} onOpen={open} onNew={() => create(gallery)} />
             ) : item ? (
-              <ItemEditor key={item.uid} item={item} />
+              <ItemEditor key={item.uid} item={item} onOpen={open} onBundle={showBundles} />
             ) : loaded && <Welcome onFolder={() => folderInput.current?.click()} onNew={create} />}
           </div>
           </div>

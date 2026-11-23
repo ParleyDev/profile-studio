@@ -1,9 +1,13 @@
-import { CheckCircle2, CircleAlert, CloudDownload, CloudUpload, Loader2, LogIn, LogOut, RefreshCw, Square } from 'lucide-react'
+import { CheckCircle2, CircleAlert, CloudDownload, CloudUpload, Loader2, LogIn, LogOut, RefreshCw, Square, Wand2 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { KIND_LABELS } from '../format/kinds'
 import { keyOf } from '../format/workspace'
 import { cleanBase, folderStatus, resumeSignIn, signIn, signInReturned, signOut, useConn, type Conn } from '../lib/parley'
 import { useStudio } from '../lib/store'
+import FixNames from './FixNames'
+import FolderSync from './FolderSync'
+import { nameFixes } from '../format/names'
+import { idOf } from '../lib/merge'
 import { plan, publish, type Action, type Outcome, type PlanRow } from '../lib/sync'
 
 // The instance's address is remembered to fill the form.
@@ -78,6 +82,7 @@ function Connected({ conn: c, onPull }: { conn: Conn; onPull: (c: Conn) => void 
   const [error, setError] = useState<string | null>(null)
   const [outcomes, setOutcomes] = useState<Outcome[] | null>(null)
   const [showSame, setShowSame] = useState(false)
+  const [fixing, setFixing] = useState(false)
   const stop = useRef<AbortController | null>(null)
   const draftCount = Object.keys(drafts).length
 
@@ -118,6 +123,13 @@ function Connected({ conn: c, onPull }: { conn: Conn; onPull: (c: Conn) => void 
 
   const groups = useMemo(() => Object.fromEntries(ACTIONS.map((a) => [a.id, (rows ?? []).filter((r) => r.action === a.id)])) as Record<Action, PlanRow[]>, [rows])
   const failed = outcomes?.filter((o) => !o.ok) ?? []
+  // Names Parley refuses among the blocked items, tidied: ids must not clash with any item here or on the instance.
+  const fixes = useMemo(() => {
+    if (!rows) return []
+    const taken = new Set([...ws.items.map((i) => `${i.kind}/${idOf(i)}`), ...rows.filter((r) => r.remote).map((r) => `${r.item.kind}/${r.remote!.value.replace(/^asset:/, '')}`)])
+    const onInstance = new Set(rows.filter((r) => r.remote).map((r) => r.item.uid))
+    return nameFixes(groups.blocked.map((r) => r.item), (it) => onInstance.has(it.uid), taken)
+  }, [rows, groups, ws.items])
   const toggle = (r: PlanRow) => { const n = new Set(picked); if (n.has(r)) n.delete(r); else n.add(r); setPicked(n) }
 
   return (
@@ -136,6 +148,7 @@ function Connected({ conn: c, onPull }: { conn: Conn; onPull: (c: Conn) => void 
         {rows && <button type="button" className="btn-primary" disabled={!!progress || !picked.size || writable === false} onClick={() => void send()} data-publish-send><CloudUpload size={16} />Publish {picked.size.toLocaleString()}</button>}
         {progress && <span className="flex items-center gap-2 text-sm text-text-1" data-publish-progress><Loader2 size={14} className="animate-spin" />{progress}<button type="button" className="btn-ghost !px-2 !py-1" onClick={() => stop.current?.abort()} title="Stop"><Square size={12} />Stop</button></span>}
       </div>
+      <FolderSync conn={c} writable={writable} />
       {draftCount > 0 && <p className="text-sm text-warn">{draftCount} draft{draftCount === 1 ? ' isn\'t' : 's aren\'t'} saved, so {draftCount === 1 ? 'it' : 'they'} won't be published.</p>}
       {!rows && !progress && <p className="text-sm text-text-2">Comparing reads the instance's items. The first time, it also downloads the files of items both sides have, to see which changed; after that only files you changed are checked.</p>}
       {error && <p className="flex items-center gap-2 text-sm text-danger" data-publish-error><CircleAlert size={14} />{error}</p>}
@@ -158,6 +171,7 @@ function Connected({ conn: c, onPull }: { conn: Conn; onPull: (c: Conn) => void 
               {selectable && <input type="checkbox" checked={all} onChange={() => { const n = new Set(picked); list.forEach((r) => (all ? n.delete(r) : n.add(r))); setPicked(n) }} title="All or none" />}
               <div className="label !mb-0">{a.title} · {list.length.toLocaleString()}</div>
               <span className="text-xs text-text-2">{a.blurb}</span>
+              {a.id === 'blocked' && fixes.length > 0 && <button type="button" className="btn-ghost !px-2 !py-0.5 text-xs" onClick={() => setFixing(true)} title="Tidy the names Parley refuses, after a look at each" data-publish-fix-names><Wand2 size={12} />Fix {fixes.length} name{fixes.length === 1 ? '' : 's'}</button>}
               {a.id === 'same' && <button type="button" className="btn-ghost !px-2 !py-0.5 text-xs" onClick={() => setShowSame(!showSame)}>{showSame ? 'Hide' : 'Show'}</button>}
             </div>
             {!hidden && (
@@ -178,6 +192,7 @@ function Connected({ conn: c, onPull }: { conn: Conn; onPull: (c: Conn) => void 
           </section>
         )
       })}
+      {fixing && <FixNames fixes={fixes} items={ws.items} onClose={() => setFixing(false)} />}
       {rows && !rows.length && <p className="text-sm text-text-2">No saved items to publish.</p>}
     </div>
   )

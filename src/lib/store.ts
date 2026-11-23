@@ -1,5 +1,8 @@
 import { useSyncExternalStore } from 'react'
 import type { Kind } from '../format/kinds'
+import { applyFix, type NameFix } from '../format/names'
+import { TYPE_OF } from '../format/shop'
+import { cleanTags } from '../format/tags'
 import { emptyWorkspace, type Entry, type Item, type Workspace } from '../format/workspace'
 
 /*
@@ -15,7 +18,7 @@ const DB = 'parley-profile-studio', VERSION = 3
 const LEGACY = 'workspace', META = 'meta', ITEMS = 'items', BLOBS = 'blobs', DRAFTS = 'drafts'
 
 interface ItemRec { uid: string; kind: Kind; entry: Entry; files: Record<string, string> }
-interface MetaRec { order: string[]; extras: Workspace['extras']; marks?: Marks }
+interface MetaRec { order: string[]; extras: Workspace['extras']; bundles?: Workspace['bundles']; localBundles?: Workspace['localBundles']; format?: Workspace['format']; marks?: Marks }
 /** Items a merge or pull brought in or changed, by uid, until you clear them. */
 export type Marks = Record<string, 'new' | 'updated'>
 
@@ -82,7 +85,7 @@ const blobId = (b: Blob) => {
 const savedItems = new Map<string, Item>()
 const savedDrafts = new Map<string, Item>()
 const savedBlobs = new Set<string>()
-let savedMeta: { order: string[]; extras: Workspace['extras']; marks: Marks } | null = null
+let savedMeta: { order: string[]; extras: Workspace['extras']; bundles?: Workspace['bundles']; localBundles?: Workspace['localBundles']; format?: Workspace['format']; marks: Marks } | null = null
 
 let timer: number | undefined
 let flushing = false, again = false
@@ -135,20 +138,20 @@ async function flush() {
 
       const order = ws.items.map((i) => i.uid)
       const marks = state.marks
-      const metaChanged = !savedMeta || savedMeta.extras !== ws.extras || savedMeta.marks !== marks || savedMeta.order.length !== order.length || savedMeta.order.some((u, i) => u !== order[i])
+      const metaChanged = !savedMeta || savedMeta.extras !== ws.extras || savedMeta.bundles !== ws.bundles || savedMeta.localBundles !== ws.localBundles || savedMeta.format !== ws.format || savedMeta.marks !== marks || savedMeta.order.length !== order.length || savedMeta.order.some((u, i) => u !== order[i])
       if (changed.length || removed.length || metaChanged || dChanged.length || dRemoved.length) {
         await tx([ITEMS, META, DRAFTS], (t) => {
           for (const it of changed) t.objectStore(ITEMS).put(record(it), it.uid)
           for (const u of removed) t.objectStore(ITEMS).delete(u)
           for (const d of dChanged) t.objectStore(DRAFTS).put(record(d), d.uid)
           for (const u of dRemoved) t.objectStore(DRAFTS).delete(u)
-          if (metaChanged) t.objectStore(META).put({ order, extras: ws.extras, marks } satisfies MetaRec, 'ws')
+          if (metaChanged) t.objectStore(META).put({ order, extras: ws.extras, bundles: ws.bundles, localBundles: ws.localBundles, format: ws.format, marks } satisfies MetaRec, 'ws')
         })
         for (const it of changed) savedItems.set(it.uid, it)
         for (const u of removed) savedItems.delete(u)
         for (const d of dChanged) savedDrafts.set(d.uid, d)
         for (const u of dRemoved) savedDrafts.delete(u)
-        savedMeta = { order, extras: ws.extras, marks }
+        savedMeta = { order, extras: ws.extras, bundles: ws.bundles, localBundles: ws.localBundles, format: ws.format, marks }
       }
 
       // Files nothing uses any more.
@@ -213,9 +216,9 @@ export async function restore() {
     }
     const drafts: Record<string, Item> = {}
     for (const r of draftRecs) { const d = fromRec(r); drafts[d.uid] = d; savedDrafts.set(d.uid, d) }
-    const ws: Workspace = { items, extras: meta.extras ?? {} }
+    const ws: Workspace = { items, extras: meta.extras ?? {}, bundles: meta.bundles, localBundles: meta.localBundles, format: meta.format }
     const marks = meta.marks ?? {}
-    savedMeta = { order: meta.order, extras: ws.extras, marks }
+    savedMeta = { order: meta.order, extras: ws.extras, bundles: ws.bundles, localBundles: ws.localBundles, format: ws.format, marks }
     set({ ws, drafts, marks, selected: items[0]?.uid ?? null })
     // Records or files left over from an interrupted save get tidied by the next save.
     if (recs.length !== items.length || blobKeys.length) persist()
@@ -241,19 +244,81 @@ export function replaceWorkspace(ws: Workspace) { set({ ws, drafts: {}, marks: {
  * Merge items in: each `{ replace, item }` takes the place of the saved item with uid `replace` (keeping that uid,
  * its place and any draft), and each `{ item }` is added at the end. They're marked until the marks are cleared.
  */
-export function mergeItems(changes: { replace?: string; item: Item }[], extras: Workspace['extras'] = {}) {
+export function mergeItems(changes: { replace?: string; item: Item }[], extras: Workspace['extras'] = {}, bundles?: Workspace['bundles'], format?: Workspace['format'], localBundles?: Workspace['localBundles']) {
   const marks = { ...state.marks }
   const by = new Map<string, Item>()
   for (const c of changes) if (c.replace) by.set(c.replace, { ...c.item, uid: c.replace })
   const items = state.ws.items.map((i) => by.get(i.uid) ?? i)
   for (const uid of by.keys()) if (marks[uid] !== 'new') marks[uid] = 'updated'
   for (const c of changes) if (!c.replace) { items.push(c.item); marks[c.item.uid] = 'new' }
-  // The open folder's own settings (item_count, say) win over the incoming ones.
+  // The incoming folder's settings are the newer (a sync script's tag labels, say); ones only the open folder has stay.
+  // item_count and collections are worked out from the items when written, so they can't go stale either way.
   const ex: Workspace['extras'] = { ...state.ws.extras }
-  for (const k of Object.keys(extras) as Kind[]) ex[k] = { ...extras[k], ...state.ws.extras[k] }
-  set({ ws: { items, extras: ex }, marks, selected: state.selected ?? changes[0]?.item.uid ?? null }); persist()
+  for (const k of Object.keys(extras) as Kind[]) ex[k] = { ...state.ws.extras[k], ...extras[k] }
+  set({ ws: { items, extras: ex, bundles: bundles ?? state.ws.bundles, localBundles: mergeLocal(state.ws.localBundles, localBundles), format: { ...state.ws.format, ...format } }, marks, selected: state.selected ?? changes[0]?.item.uid ?? null }); persist()
 }
+/** Your own bundle changes win over incoming ones for the same bundle; incoming ones for other bundles are added. */
+function mergeLocal(mine: Workspace['localBundles'], incoming: Workspace['localBundles']): Workspace['localBundles'] {
+  if (!incoming) return mine
+  if (!mine) return incoming
+  const list = (f: Record<string, unknown>) => (Array.isArray(f.bundles) ? (f.bundles as { id?: unknown }[]) : [])
+  const have = new Set(list(mine).map((b) => b.id))
+  return { ...incoming, ...mine, bundles: [...list(mine), ...list(incoming).filter((b) => !have.has(b.id))] }
+}
+
+/** Change bundles.local.json (bundles.json, the sync script's, is never changed). Applied at once, like tags. */
+export function setLocalBundles(localBundles: Record<string, unknown>) { set({ ws: { ...state.ws, localBundles } }); persist() }
+
+/** Take the instance's copy of a root file (undefined: it has none). */
+export function setRootJson(root: 'bundles' | 'localBundles', value: Record<string, unknown> | undefined) { set({ ws: { ...state.ws, [root]: value } }); persist() }
+/** Set (or, with null, remove) a kind's top-level metadata.json fields, keeping the rest in place. */
+export function setKindFields(kind: Kind, fields: Record<string, unknown>) {
+  const ex = { ...state.ws.extras[kind] }
+  for (const [k, v] of Object.entries(fields)) { if (v === null) delete ex[k]; else ex[k] = v }
+  set({ ws: { ...state.ws, extras: { ...state.ws.extras, [kind]: ex } } }); persist()
+}
+
 export function clearMarks() { set({ marks: {} }); persist() }
+
+/**
+ * Add and take off tags on several items at once. It changes the saved items directly (like moving or deleting does),
+ * and any drafts of them too, so their drafts don't undo it.
+ */
+export function tagItems(uids: string[], add: string[], remove: string[] = []) {
+  const want = new Set(uids)
+  const retag = (it: Item): Item => {
+    const before = Array.isArray(it.entry.tags) ? cleanTags(it.entry.tags) : []
+    const after = cleanTags([...before.filter((t) => !remove.includes(t)), ...add])
+    if (JSON.stringify(it.entry.tags ?? []) === JSON.stringify(after)) return it
+    const { tags: _old, ...entry } = it.entry
+    return { ...it, entry: after.length ? { ...entry, tags: after } : entry }
+  }
+  const items = state.ws.items.map((i) => (want.has(i.uid) ? retag(i) : i))
+  const drafts = Object.fromEntries(Object.entries(state.drafts).map(([u, d]) => [u, want.has(u) ? retag(d) : d]))
+  set({ ws: { ...state.ws, items }, drafts }); persist()
+}
+/**
+ * Rename items' files and folders at once (saved items and their drafts alike). Bundles in bundles.local.json that
+ * name a renamed item by its file or folder name follow it.
+ */
+export function renameItems(fixes: NameFix[]) {
+  const by = new Map(fixes.map((f) => [f.uid, f]))
+  const fix = (it: Item) => { const f = by.get(it.uid); return f ? applyFix(it, f) : it }
+  const items = state.ws.items.map(fix)
+  const drafts = Object.fromEntries(Object.entries(state.drafts).map(([u, d]) => [u, fix(d)]))
+  const keys = new Map(fixes.filter((f) => f.key).map((f) => [`${TYPE_OF[f.kind]}/${f.key!.from}`, f.key!.to]))
+  let localBundles = state.ws.localBundles
+  const list = localBundles?.bundles
+  if (keys.size && Array.isArray(list)) {
+    const next = list.map((b) => {
+      if (!b || typeof b !== 'object' || !Array.isArray((b as { items?: unknown }).items)) return b
+      const bi = (b as { items: Record<string, unknown>[] }).items
+      return { ...b, items: bi.map((x) => { const to = x && typeof x.key === 'string' ? keys.get(`${String(x.type)}/${x.key}`) : undefined; return to ? { ...x, key: to } : x }) }
+    })
+    localBundles = { ...localBundles, bundles: next }
+  }
+  set({ ws: { ...state.ws, items, localBundles }, drafts }); persist()
+}
 export function select(uid: string | null) { set({ selected: uid }) }
 
 /** A new item starts as a draft: it joins the list when saved. */

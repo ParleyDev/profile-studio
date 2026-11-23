@@ -28,10 +28,16 @@ describe('Parley\'s naming rules', () => {
     expect(okFileName('effect', 'clip.webm')).toBe(false)
     expect(okFileName('nameplate', 'clip.webm')).toBe(true)
     expect(okFolderName('alt_raccoon')).toBe(true)
-    expect(okFolderName('a b')).toBe(false)
+    expect(okFolderName('a b')).toBe(true)
+    expect(okFolderName('a.b')).toBe(false)
+    expect(okFolderName(' a')).toBe(false)
+    expect(okFileName('nameplate', "all_bark,_all_bite (it's & you!).webm")).toBe(true)
+    expect(okFileName('effect', 'café.png')).toBe(false)
+    expect(okFileName('effect', 'a.png ')).toBe(false)
     expect(assetId('A Hint Of Clove.PNG', 'decoration')).toBe('a_hint_of_clove')
     expect(assetId('Rain.Drops', 'effect')).toBe('rain_drops')
-    expect(safeFileName('My cool pic!.png')).toBe('My_cool_pic_.png')
+    expect(safeFileName('My cool pic!.png')).toBe('My cool pic!.png')
+    expect(safeFileName('My:cool*pic.png')).toBe('My_cool_pic.png')
   })
   it('read layer placement from Discord\'s file names', () => {
     expect(newFrameLayer('back_rail_center.png')).toMatchObject({ order: 'back', type: 'rail', anchor: 'center' })
@@ -109,12 +115,13 @@ describe('checks', () => {
   it('treat characters Import refuses as warnings, or errors when checking for Import', async () => {
     const { workspace: ws } = await readFolder(folder())
     const it0 = ws.items[0]
-    it0.entry.file = "Halo (gold), it's.png"
-    it0.files = { "Halo (gold), it's.png": png() }
-    const loose = validateItem(it0, ws)
+    it0.entry.file = 'Halo #gold.png'
+    it0.files = { 'Halo #gold.png': png() }
+    const hash = { ...DEFAULT_RULES, extraChars: '#' }
+    const loose = validateItem(it0, ws, {}, undefined, hash)
     expect(loose.filter((p) => p.level === 'error')).toEqual([])
     expect(loose.some((p) => p.level === 'warning' && p.message.includes("Parley's Import refuses"))).toBe(true)
-    const strict = validateItem(it0, ws, {}, undefined, { ...DEFAULT_RULES, strictImport: true })
+    const strict = validateItem(it0, ws, {}, undefined, { ...hash, strictImport: true })
     expect(strict.some((p) => p.level === 'error' && p.message.includes("Parley's Import refuses"))).toBe(true)
     const none = validateItem(it0, ws, {}, undefined, { ...DEFAULT_RULES, extraChars: '' })
     expect(none.some((p) => p.level === 'error' && p.message.includes('allowed'))).toBe(true)
@@ -133,12 +140,15 @@ describe('name rules', () => {
     expect(checkName('a/b.png', false, { ...DEFAULT_RULES, extraChars: '/' }).level).toBe('bad')
     expect(checkName('a:b.png', false, { ...DEFAULT_RULES, extraChars: ':' }).level).toBe('bad')
     expect(checkName(' a.png', false).level).toBe('bad')
-    expect(checkName('a (b).png', false).level).toBe('import')
+    expect(checkName('a (b).png', false).level).toBe('ok')
+    expect(checkName('a#b.png', false, { ...DEFAULT_RULES, extraChars: '#' }).level).toBe('import')
+    expect(checkName('a#b.png', false).level).toBe('bad')
     expect(checkName('a_b.png', false).level).toBe('ok')
   })
   it('keep allowed characters when making names safe', () => {
-    expect(safeFileName("it's (gold).png", " '()")).toBe("it's (gold).png")
-    expect(safeFileName("it's (gold).png")).toBe('it_s_gold_.png')
-    expect(safeFolderName('a:b (c)', ' ()')).toBe('a_b (c)')
+    expect(safeFileName("it's (gold).png")).toBe("it's (gold).png")
+    expect(safeFileName('a#b.png', '#')).toBe('a#b.png')
+    expect(safeFileName('a#b.png')).toBe('a_b.png')
+    expect(safeFolderName('a:b (c)')).toBe('a_b (c)')
   })
 })

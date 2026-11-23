@@ -38,11 +38,17 @@ export interface RemoteItem {
   /** Decorations and nameplates: `{file}`; effects: `{layers, still?, thumbnail?, reduced_motion?}`; frames: `{layers, layout}`. */
   data: { file?: string; layers?: Record<string, unknown>[]; layout?: Record<string, unknown> }
   users: number
+  /** The item's tags, from instances that read them (absent on ones that don't yet). */
+  tags?: string[] | null
+  /** Folder items: the whole metadata.json entry, from instances that report it (absent on older ones). */
+  entry?: Record<string, unknown>
 }
 
 export class ParleyError extends Error {
   readonly status: number
-  constructor(message: string, status = 0) { super(message); this.status = status }
+  /** 412: the instance's file changed since it was read; this is what it holds now ({json, etag}, or {fields, etag}). */
+  readonly current?: unknown
+  constructor(message: string, status = 0, current?: unknown) { super(message); this.status = status; this.current = current }
 }
 
 /** "parley.example.com/" or "https://parley.example.com/api" → "https://parley.example.com". */
@@ -219,6 +225,11 @@ async function call<T>(c: Conn, path: string, init: RequestInit = {}, auth = tru
     let res: Response
     try { res = await fetch(`${cur.base}/api${path}`, { ...init, headers }) } catch { throw unreachable(cur.base) }
     if (res.status === 401 && auth && attempt === 0) { cur = await refresh(conn?.base === cur.base ? conn : cur); continue }
+    if (res.status === 412) {
+      let current: unknown
+      try { current = await res.json() } catch { /* none given */ }
+      throw new ParleyError('It changed on the instance since it was read. Compare again.', 412, current)
+    }
     if (!res.ok) {
       let msg = await errorText(res)
       if (res.status === 401) { setConn(null); msg = 'Signed out: sign in again.' }
@@ -261,3 +272,30 @@ export const importItem = (c: Conn, kind: Kind, entry: Entry, files: Record<stri
 /** An item already there: name, description, layers and layout, plus new or replaced files. */
 export const editItem = (c: Conn, kind: Kind, id: string, meta: Record<string, unknown>, files: Record<string, Blob>) =>
   call<{ value: string }>(c, `/admin/cosmetics/${kind}/folder/${encodeURIComponent(id)}`, { method: 'PATCH', body: form('meta', meta, files) })
+
+// --- bundles and folder settings (instances with the bundles API; older ones answer 404) -----------------------------
+
+export type BundleFileName = 'bundles.json' | 'bundles.local.json'
+export interface RemoteJsonFile { json?: Record<string, unknown>; etag: string; error?: string }
+const missing = (e: unknown) => e instanceof ParleyError && e.status === 404
+
+/** The instance's bundles.json and bundles.local.json (null: no such file), or null when it has no bundles API. */
+export async function remoteBundleFiles(c: Conn): Promise<Record<BundleFileName, RemoteJsonFile | null> | null> {
+  try {
+    const r = await call<{ files: Partial<Record<BundleFileName, RemoteJsonFile | null>> }>(c, '/admin/cosmetics/bundles', { cache: 'no-store' })
+    return { 'bundles.json': r.files['bundles.json'] ?? null, 'bundles.local.json': r.files['bundles.local.json'] ?? null }
+  } catch (e) { if (missing(e)) return null; throw e }
+}
+/** Write a bundle file: `etag` replaces that version, null creates it (a 412 means it moved on). */
+export const putBundleFile = (c: Conn, name: BundleFileName, json: unknown, etag: string | null) =>
+  call<{ etag: string }>(c, `/admin/cosmetics/bundles/${name}`, { method: 'PUT', body: JSON.stringify(json), headers: etag ? { 'If-Match': `"${etag}"` } : { 'If-None-Match': '*' } })
+export const deleteBundleFile = (c: Conn, name: BundleFileName, etag: string) =>
+  call<void>(c, `/admin/cosmetics/bundles/${name}`, { method: 'DELETE', headers: { 'If-Match': `"${etag}"` } })
+
+/** A kind's metadata.json beyond its items, or null when the instance can't say. */
+export async function remoteMetadata(c: Conn, kind: Kind): Promise<{ fields: Record<string, unknown>; etag: string | null } | null> {
+  try { return await call<{ fields: Record<string, unknown>; etag: string | null }>(c, `/admin/cosmetics/${kind}/metadata`, { cache: 'no-store' }) } catch (e) { if (missing(e)) return null; throw e }
+}
+/** Set (or, with null, remove) top-level metadata.json fields; a null etag (no metadata.json there yet) writes unchecked. */
+export const patchMetadata = (c: Conn, kind: Kind, fields: Record<string, unknown>, etag: string | null) =>
+  call<{ etag: string }>(c, `/admin/cosmetics/${kind}/metadata`, { method: 'PATCH', body: JSON.stringify({ fields }), headers: etag ? { 'If-Match': `"${etag}"` } : {} })

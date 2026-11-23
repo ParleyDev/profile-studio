@@ -1,9 +1,10 @@
-import { AlertTriangle, ChevronDown, ChevronRight, CircleAlert, LayoutGrid, Plus, Search, X } from 'lucide-react'
-import { memo, useEffect, useRef, type RefObject } from 'react'
+import { AlertTriangle, ChevronDown, ChevronRight, CircleAlert, LayoutGrid, Package, Plus, Search, X } from 'lucide-react'
+import { memo, useEffect, useRef, useState, type RefObject } from 'react'
 import { KIND_DIRS, KIND_LABELS, KINDS, type Kind } from '../format/kinds'
 import type { Problem } from '../format/validate'
 import { keyOf, type Item } from '../format/workspace'
 import type { Marks } from '../lib/store'
+import { matchesQuery, parseQuery, toggleTagInQuery } from '../format/tags'
 import Thumb from './Thumb'
 
 export type Filter = 'all' | 'errors' | 'warnings' | 'merged'
@@ -18,10 +19,10 @@ const counts = (list: Problem[] | undefined) => {
 
 /** The items a search and filter leave, by kind, in metadata.json order. */
 export function visibleItems(items: Item[], problems: Map<string, Problem[]>, nav: Nav, marks: Marks = {}): Map<Kind, Item[]> {
-  const q = nav.query.trim().toLowerCase()
+  const q = parseQuery(nav.query)
   const out = new Map<Kind, Item[]>(KINDS.map((k) => [k, []]))
   for (const it of items) {
-    if (q && !`${it.entry.name ?? ''}\n${keyOf(it)}\n${it.entry.description ?? ''}`.toLowerCase().includes(q)) continue
+    if (!matchesQuery(it, q, keyOf(it))) continue
     if (nav.filter === 'merged') { if (!marks[it.uid]) continue }
     else if (nav.filter !== 'all') {
       const c = counts(problems.get(it.uid))
@@ -65,7 +66,7 @@ const Row = memo(function Row({ item, err, warn, selected, edited, mark, onSelec
   )
 })
 
-export default function Sidebar({ items, total, problems, nav, setNav, selected, galleryKind, edited, marks, onClearMarks, onSelect, onGallery, onNew, searchRef }: {
+export default function Sidebar({ items, total, problems, nav, setNav, selected, galleryKind, edited, marks, onClearMarks, tags, onSelect, onGallery, onNew, searchRef, bundleCount, bundlesOpen, onBundles }: {
   items: Map<Kind, Item[]>
   total: Map<Kind, number>
   problems: Map<string, Problem[]>
@@ -77,16 +78,24 @@ export default function Sidebar({ items, total, problems, nav, setNav, selected,
   edited: Record<string, unknown>
   marks: Marks
   onClearMarks: () => void
+  /** Tags in use with their counts, most used first. */
+  tags: [string, number][]
   onSelect: (uid: string) => void
   onGallery: (k: Kind) => void
   onNew: (k: Kind) => void
   searchRef: RefObject<HTMLInputElement | null>
+  bundleCount: number
+  bundlesOpen: boolean
+  onBundles: () => void
 }) {
   let errs = 0, warns = 0
   for (const l of problems.values()) { const c = counts(l); if (c.err) errs++; if (c.warn) warns++ }
   const toggle = (k: Kind) => setNav({ ...nav, collapsed: openOnly(nav.collapsed.has(k) ? k : null) })
   const filtered = nav.query.trim() !== '' || nav.filter !== 'all'
   const merged = Object.keys(marks).length
+  const picked = new Set(parseQuery(nav.query).tags.map((t) => t.replace(/[\s_-]+/g, '-')))
+  const [allTagsOpen, setAllTagsOpen] = useState(false)
+  const shownTags = allTagsOpen ? tags : tags.slice(0, 12)
   return (
     <nav className="flex w-72 shrink-0 flex-col border-r border-line bg-bg-1" data-sidebar>
       <div className="space-y-2 border-b border-line p-2">
@@ -96,7 +105,7 @@ export default function Sidebar({ items, total, problems, nav, setNav, selected,
           <input
             ref={searchRef}
             className="input !py-1.5 !pl-8 !pr-7"
-            placeholder="Search  ( / )"
+            placeholder="Search, or #tag  ( / )"
             title="/ to search · ↓ or Enter to open the first match · Esc to clear"
             value={nav.query}
             onChange={(e) => setNav({ ...nav, query: e.target.value })}
@@ -120,6 +129,15 @@ export default function Sidebar({ items, total, problems, nav, setNav, selected,
           ))}
           {merged > 0 && <button type="button" className="-ml-1 rounded p-1 text-text-2 hover:text-text-0" title="Clear the New and Updated marks" onClick={() => { onClearMarks(); if (nav.filter === 'merged') setNav({ ...nav, filter: 'all' }) }} data-clear-marks><X size={12} /></button>}
         </div>
+        {tags.length > 0 && (
+          <div className="flex max-h-28 flex-wrap gap-1 overflow-y-auto text-[11px]" data-tag-bar>
+            {shownTags.map(([t, n]) => {
+              const on = picked.has(t.replace(/[\s_-]+/g, '-'))
+              return <button key={t} type="button" className={`rounded-full border px-2 py-0.5 ${on ? 'border-accent bg-accent/20 text-text-0' : 'border-line text-text-2 hover:border-accent/60 hover:text-text-0'}`} aria-pressed={on} title={on ? `Stop filtering by ${t}` : `Show only items tagged ${t} (adds #${t.replace(/ /g, '-')} to the search)`} onClick={() => setNav({ ...nav, query: toggleTagInQuery(nav.query, t).trimEnd() })} data-tag-chip={t}>#{t} <span className="opacity-60">{n}</span></button>
+            })}
+            {tags.length > 12 && <button type="button" className="px-1 text-text-2 hover:text-text-0" onClick={() => setAllTagsOpen(!allTagsOpen)}>{allTagsOpen ? 'fewer' : `+${tags.length - 12} more`}</button>}
+          </div>
+        )}
       </div>
       {/* Every group's header stays in view; only the open group's items scroll, between them. */}
       <div className="flex min-h-0 flex-1 flex-col gap-1 p-2">
@@ -152,6 +170,13 @@ export default function Sidebar({ items, total, problems, nav, setNav, selected,
           )
         })}
         {filtered && KINDS.every((k) => !items.get(k)!.length) && <p className="px-2 py-4 text-sm text-text-2">Nothing matches.</p>}
+      </div>
+      <div className="shrink-0 border-t border-line p-2">
+        <button type="button" className={`flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left ${bundlesOpen ? 'bg-bg-3' : 'hover:bg-bg-2'}`} onClick={onBundles} title="Browse and edit bundles" data-sidebar-bundles>
+          <Package size={14} className="text-text-2" />
+          <span className="text-[11px] font-bold uppercase tracking-wider text-text-2">Bundles</span>
+          <span className="text-[11px] text-text-2">{bundleCount}</span>
+        </button>
       </div>
     </nav>
   )

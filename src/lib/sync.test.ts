@@ -14,7 +14,7 @@ function fakeParley() {
       { value: 'asset:ring', source: 'folder', name: 'Ring', description: '', enabled: true, deleted: false, data: { file: 'ring.png' }, users: 3 },
       { value: 'heart', source: 'builtin', name: null, description: null, enabled: true, deleted: false, data: {}, users: 0 },
     ],
-    nameplate: [],
+    nameplate: [{ value: 'asset:all_bark__all_bite', source: 'folder', name: 'All Bark, All Bite', description: '', enabled: true, deleted: false, data: { file: 'all_bark,_all_bite.webm' }, users: 0 }],
     effect: [{ value: 'asset:snow', source: 'folder', name: 'Snow', description: 'Flakes', enabled: true, deleted: false, data: { layers: [{ file: 'layer_01.png', start_ms: 0, duration_ms: 3000, loop: true, loop_delay_ms: 0, z_index: 100, width: 900, height: 1760 }] }, users: 0 }],
     frame: [],
   }
@@ -41,6 +41,23 @@ function fakeParley() {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('publishing to Parley', () => {
+  it('lets items already on the instance keep names Import would refuse', async () => {
+    const p = fakeParley()
+    vi.stubGlobal('fetch', p.fetch)
+    const bark: Item = { uid: 'n', kind: 'nameplate', entry: { file: 'all_bark,_all_bite.webm', name: 'All Bark, All Bite!' }, files: { 'all_bark,_all_bite.webm': new Blob(['v2']) } }
+    const odd = (layer: string): Item => ({ uid: 's', kind: 'effect', entry: { folder: 'snow', name: 'Snow', description: 'Flakes', layers: [{ file: layer, start_ms: 0, duration_ms: 3000, loop: true, loop_delay_ms: 0, z_index: 100 }] }, files: { [layer]: png('snow 1') } })
+    const rows = await plan(conn, [bark, odd('layer:1.png')], () => {})
+    expect(rows[0].action).toBe('update')
+    expect(rows[0].files).toEqual(['all_bark,_all_bite.webm'])
+    // Changed layers are checked: Parley would refuse the odd name.
+    expect(rows[1].action).toBe('blocked')
+    expect(rows[1].notes[0]).toContain('layer:1.png')
+    await publish(conn, [rows[0]], () => {})
+    // Sent under a plain name: Parley keeps the item's own name and takes only the extension.
+    expect(p.sent).toEqual([{ method: 'PATCH', path: '/api/admin/cosmetics/nameplate/folder/all_bark__all_bite', json: { name: 'All Bark, All Bite!' }, files: ['file.webm'] }])
+  })
+
+
   it('adds new items, updates changed ones, skips the same and blocks unsafe names', async () => {
     const p = fakeParley()
     vi.stubGlobal('fetch', p.fetch)
@@ -48,7 +65,7 @@ describe('publishing to Parley', () => {
       { uid: 'a', kind: 'decoration', entry: { file: 'ring.png', name: 'Ring', description: '' }, files: { 'ring.png': png('new ring') } },
       { uid: 'b', kind: 'decoration', entry: { file: 'star.png', name: 'Star' }, files: { 'star.png': png('star') } },
       { uid: 'c', kind: 'effect', entry: { folder: 'snow', name: 'Snow', description: 'Flakes', layers: [{ file: 'layer_01.png', start_ms: 0, duration_ms: 3000, loop: true, loop_delay_ms: 0, z_index: 100 }] }, files: { 'layer_01.png': png('snow 1') } },
-      { uid: 'd', kind: 'nameplate', entry: { file: 'Rooftop (1).webm', name: 'Rooftop' }, files: { 'Rooftop (1).webm': new Blob(['v']) } },
+      { uid: 'd', kind: 'nameplate', entry: { file: 'Rooftop:1.webm', name: 'Rooftop' }, files: { 'Rooftop:1.webm': new Blob(['v']) } },
     ]
     const renamed: Item = { ...items[2], uid: 'e', entry: { ...items[2].entry, name: 'Snowier' } }
     const rows = await plan(conn, items, () => {})
@@ -68,7 +85,7 @@ describe('publishing to Parley', () => {
     const out = await publish(conn, [by.a, by.b, again[0]], () => {})
     expect(out.every((o) => o.ok)).toBe(true)
     expect(p.sent).toEqual([
-      { method: 'PATCH', path: '/api/admin/cosmetics/decoration/folder/ring', json: {}, files: ['ring.png'] },
+      { method: 'PATCH', path: '/api/admin/cosmetics/decoration/folder/ring', json: {}, files: ['file.png'] },
       { method: 'POST', path: '/api/admin/cosmetics/decoration/import', json: { file: 'star.png', name: 'Star' }, files: ['star.png'] },
       { method: 'PATCH', path: '/api/admin/cosmetics/effect/folder/snow', json: { name: 'Snowier' }, files: [] },
     ])
@@ -84,6 +101,25 @@ describe('publishing to Parley', () => {
     const rows = await plan(conn, items, () => {})
     const out = await publish(conn, rows, () => {})
     expect(out.map((o) => [o.ok, o.error])).toEqual([[false, 'star.png is already in the assets folder'], [true, undefined]])
+  })
+
+  it('syncs tags only with instances that report them', async () => {
+    const ring = { file: 'ring.png', name: 'Ring', description: '', tags: ['shiny'] }
+    const list = (tags?: string[]) => ({ decoration: [{ value: 'asset:ring', source: 'folder', name: 'Ring', description: '', enabled: true, deleted: false, data: { file: 'ring.png' }, users: 0, ...(tags ? { tags } : {}) }] })
+    const parley = (lists: Record<string, unknown[]>) => vi.fn(async (url: string) => {
+      const path = new URL(url).pathname
+      const m = path.match(/^\/api\/admin\/cosmetics\/(\w+)$/)
+      if (m) return new Response(JSON.stringify(lists[m[1]] ?? []), { headers: { 'content-type': 'application/json' } })
+      return new Response('old ring', { headers: { 'content-type': 'image/png' } })
+    })
+    const items: Item[] = [{ uid: 'a', kind: 'decoration', entry: ring, files: { 'ring.png': png('old ring') } }]
+    vi.stubGlobal('fetch', parley(list()))
+    expect((await plan(conn, items, () => {}))[0].action).toBe('same')
+    vi.stubGlobal('fetch', parley(list(['old'])))
+    const [row] = await plan(conn, items, () => {})
+    expect([row.action, row.meta]).toEqual(['update', { tags: ['shiny'] }])
+    vi.stubGlobal('fetch', parley(list(['Shiny'])))
+    expect((await plan(conn, items, () => {}))[0].action).toBe('same')
   })
 
   it('cleans instance addresses', () => {

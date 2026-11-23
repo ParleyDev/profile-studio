@@ -1,4 +1,5 @@
 import { assetId, type Rules, EFFECT_SPECIAL_FILES, KIND_DIRS, layered, MAX_DESCRIPTION, checkName, DEFAULT_RULES, extOf, FILE_EXTS, MAX_FILE, MAX_LAYERS, MAX_LAYOUT, MAX_MS, MAX_NAME, MAX_Z, type EffectLayer, type FrameLayer, type FrameLayout } from './kinds'
+import { cleanTags, MAX_TAGS } from './tags'
 import { keyOf, type Item, type Workspace } from './workspace'
 
 /**
@@ -26,6 +27,15 @@ export function validateItem(it: Item, ws?: Workspace, sizes: Sizes = {}, index?
   if (!name) err('It needs a name.', 'name')
   else if (name.length > MAX_NAME) err(`Names are up to ${MAX_NAME} characters.`, 'name')
   if (typeof e.description === 'string' && e.description.trim().length > MAX_DESCRIPTION) err(`Descriptions are up to ${MAX_DESCRIPTION} characters.`, 'description')
+  if (e.tags !== undefined) {
+    const raw = Array.isArray(e.tags) ? e.tags : null
+    if (!raw) warn('Tags should be a list of words.', 'tags')
+    else {
+      const clean = cleanTags(raw)
+      if (raw.length > MAX_TAGS) warn(`Up to ${MAX_TAGS} tags: the rest are dropped when you edit them.`, 'tags')
+      else if (raw.length !== clean.length || raw.some((t, i) => t !== clean[i])) warn('Some tags aren\'t tidy (tags are lower case letters, digits, spaces, \'-\' and \'_\'): editing them tidies them.', 'tags')
+    }
+  }
 
   /** A file or folder name against the rules; `label` says which name it is. */
   const name_ = (n: string, folder: boolean, label: string, at: string) => {

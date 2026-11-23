@@ -35,7 +35,7 @@ const stills = new WeakMap<Blob, Map<number, Promise<string | null>>>()
 const queue: (() => Promise<void>)[] = []
 let running = 0
 /** A few at a time, so scrolling past hundreds doesn't start hundreds of decodes. */
-function enqueue<T>(fn: () => Promise<T>): Promise<T> {
+export function enqueue<T>(fn: () => Promise<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     queue.push(() => fn().then(resolve, reject))
     pump()
@@ -49,7 +49,7 @@ function pump() {
   }
 }
 
-async function videoFrame(b: Blob): Promise<ImageBitmap> {
+export async function videoFrame(b: Blob): Promise<ImageBitmap> {
   const url = URL.createObjectURL(b)
   try {
     const v = document.createElement('video')

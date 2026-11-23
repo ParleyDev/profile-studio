@@ -1,6 +1,6 @@
 import { RotateCcw, X } from 'lucide-react'
 import { useState } from 'react'
-import { BANNED_CHARS, cleanExtras, DEFAULT_EXTRA_CHARS, DEFAULT_RULES, MAX_FILE } from '../format/kinds'
+import { BANNED_CHARS, cleanExtras, DEFAULT_EXTRA_CHARS, DEFAULT_RULES, MAX_FILE, NAME_RULE } from '../format/kinds'
 import { resetRules, setRules, useRules } from '../lib/settings'
 
 const show = (c: string) => (c === ' ' ? 'space' : c)
@@ -23,7 +23,7 @@ export default function Settings() {
         <div className="label">How you'll add these to Parley</div>
         {([
           [false, 'Copy into the assets folder', 'Parley serves the files as they are. Names with the characters below, and big files, are warnings.'],
-          [true, 'Parley\'s Import (Admin → Cosmetics → Import)', `Import refuses names with anything but letters, digits, '.', '_' and '-', and files over ${MAX_FILE / 1024 / 1024} MB, so those are errors.`],
+          [true, 'Parley\'s Import (Admin → Cosmetics → Import)', `Import refuses names with anything but ${NAME_RULE}, and files over ${MAX_FILE / 1024 / 1024} MB, so those are errors.`],
         ] as const).map(([strict, title, body]) => (
           <label key={String(strict)} className={`flex cursor-pointer gap-3 rounded-lg border p-3 ${rules.strictImport === strict ? 'border-accent bg-accent/10' : 'border-line hover:bg-bg-3'}`}>
             <input type="radio" name="mode" className="mt-1" checked={rules.strictImport === strict} onChange={() => setRules({ strictImport: strict })} data-rule-strict={String(strict)} />
@@ -35,7 +35,7 @@ export default function Settings() {
       <section className="space-y-3">
         <div className="label">Characters allowed in file and folder names</div>
         <p className="text-sm text-text-2">
-          Letters, digits, '.', '_' and '-' are always allowed. These are allowed too{rules.strictImport ? ', but Import still refuses them' : ''}:
+          Parley takes {NAME_RULE} (no '.' in folder names); those are always allowed. These are allowed too{rules.strictImport ? ', but Import still refuses them' : ''}:
         </p>
         <div className="flex flex-wrap gap-2" data-extra-chars>
           {extras.map((c) => (
@@ -49,7 +49,7 @@ export default function Settings() {
         <div className="flex gap-2">
           <input className="input max-w-48 font-mono" placeholder="Add characters" value={add} onChange={(e) => setAdd(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && cleanExtras(add)) addChars() }} data-extra-add />
           <button type="button" className="btn-ghost" disabled={!cleanExtras(add)} onClick={addChars}>Allow</button>
-          <button type="button" className="btn-ghost" disabled={rules.extraChars === DEFAULT_EXTRA_CHARS} onClick={() => setRules({ extraChars: DEFAULT_EXTRA_CHARS })} title="The characters Parley's own assets folder uses"><RotateCcw size={14} />Default</button>
+          <button type="button" className="btn-ghost" disabled={rules.extraChars === DEFAULT_EXTRA_CHARS} onClick={() => setRules({ extraChars: DEFAULT_EXTRA_CHARS })} title="Only what Parley takes"><RotateCcw size={14} />Default</button>
         </div>
         {refused.length > 0 && <p className="text-sm text-warn">{refused.join(' ')} can't be allowed: they break paths, or some systems refuse them in file names.</p>}
         <p className="text-xs text-text-2">Never allowed: <span className="font-mono">{[...BANNED_CHARS].join(' ')}</span>, a dot first, or spaces at either end.</p>

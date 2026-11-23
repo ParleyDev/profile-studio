@@ -5,9 +5,10 @@
  * doesn't match is added. Nothing open is removed.
  */
 import { assetId, KINDS, layered, type Kind } from '../format/kinds'
+import { cleanTags } from '../format/tags'
 import { keyOf, newUid, typed, type Item } from '../format/workspace'
 import { remoteFile, remoteItems, ParleyError, type Conn, type RemoteItem } from './parley'
-import { loadKnown, saveKnown, sha256 } from './sync'
+import { loadKnown, MANAGED_FIELDS, saveKnown, sha256 } from './sync'
 
 export type MergeAction = 'new' | 'changed' | 'same' | 'skip'
 
@@ -107,6 +108,17 @@ export function pulledItem(kind: Kind, r: RemoteItem, files: Record<string, Blob
   const text = (s: unknown) => (typeof s === 'string' ? s.trim() : '')
   if (text(entry.name) !== text(r.name)) entry.name = r.name ?? ''
   if (text(entry.description) !== text(r.description)) entry.description = r.description ?? ''
+  // Present (an array, or null for none) means the instance keeps tags; missing means it predates them.
+  if (r.tags !== undefined) {
+    const tags = cleanTags(Array.isArray(r.tags) ? r.tags : [])
+    if (tags.length) entry.tags = tags
+    else delete entry.tags
+  }
+  // The instance's whole entry, when it reports it: every field it doesn't handle itself comes from there.
+  if (r.entry) {
+    for (const k of Object.keys(entry)) if (!MANAGED_FIELDS.has(k) && !(k in r.entry)) delete entry[k]
+    for (const [k, v] of Object.entries(r.entry)) if (!MANAGED_FIELDS.has(k)) entry[k] = structuredClone(v)
+  }
   if (layered(kind)) {
     const mine = Array.isArray(entry.layers) ? (entry.layers as Record<string, unknown>[]) : []
     // Parley adds each layer's pixel size; the rest is the layer as its metadata.json has it.

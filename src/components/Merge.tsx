@@ -10,6 +10,9 @@ export interface MergeSource {
   rows: MergeRow[]
   notes: string[]
   extras?: Workspace['extras']
+  bundles?: Workspace['bundles']
+  format?: Workspace['format']
+  localBundles?: Workspace['localBundles']
 }
 
 const GROUPS: { action: MergeAction; title: string; blurb: string }[] = [
@@ -60,7 +63,7 @@ export default function Merge({ title, from, load, onReplace, onApplied, onClose
   const toggle = (list: MergeRow[], on: boolean) => { const s = new Set(off); for (const r of list) { if (on) s.delete(r); else s.add(r) } setOff(s) }
 
   const apply = () => {
-    mergeItems(picked.map((r) => ({ replace: r.action === 'changed' ? r.local?.uid : undefined, item: r.incoming })), src?.extras)
+    mergeItems(picked.map((r) => ({ replace: r.action === 'changed' ? r.local?.uid : undefined, item: r.incoming })), src?.extras, src?.bundles, src?.format, src?.localBundles)
     const n = picked.filter((r) => r.action === 'new').length, u = picked.length - n
     onApplied([n && `${n} new`, u && `${u} updated`].filter(Boolean).join(', ') || 'Nothing', picked)
   }

@@ -1,6 +1,6 @@
 import { ArrowDown, ArrowUp, Copy, Timer, Trash2 } from 'lucide-react'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { assetId, displayName, DEFAULT_LAYOUT, EFFECT_SPECIAL_FILES, extOf, FILE_EXTS, KIND_DIRS, layered, MAX_DESCRIPTION, MAX_LAYOUT, MAX_MS, MAX_NAME, MAX_Z, newEffectLayer, newFrameLayer, safeFileName, safeFolderName, isVideo, type EffectLayer, type FrameLayer, type FrameLayout } from '../format/kinds'
+import { assetId, displayName, NAME_RULE, DEFAULT_LAYOUT, EFFECT_SPECIAL_FILES, extOf, FILE_EXTS, KIND_DIRS, layered, MAX_DESCRIPTION, MAX_LAYOUT, MAX_MS, MAX_NAME, MAX_Z, newEffectLayer, newFrameLayer, safeFileName, safeFolderName, isVideo, type EffectLayer, type FrameLayer, type FrameLayout } from '../format/kinds'
 import { validateItem, type Problem } from '../format/validate'
 import { keyOf, newUid, typed, type Item } from '../format/workspace'
 import { animationLength, isAnimated, useFileUrls, useSizes } from '../lib/media'
@@ -14,6 +14,11 @@ import { DropFiles, Field, fmtSize, Num, Problems } from './Fields'
 import { OptimizeButton } from './Optimize'
 import { AssembleButton } from './Assemble'
 import PublishOne from '../components/PublishOne'
+import TagInput from './Tags'
+import { TagSuggestions } from './Suggest'
+import ShopInfo from './ShopInfo'
+import { shopOf, themeLabels } from '../format/shop'
+import { allTags, cleanTags, tagsOf } from '../format/tags'
 
 const accept = (exts: string[]) => exts.map((e) => `.${e}`).join(',')
 const stem = (f: string) => (f.includes('.') ? f.slice(0, f.lastIndexOf('.')) : f)
@@ -50,7 +55,7 @@ export function ItemHeader({ item, onSignIn }: { item: Item; onSignIn: () => voi
   )
 }
 
-export default function ItemEditor({ item }: { item: Item }) {
+export default function ItemEditor({ item, onOpen, onBundle }: { item: Item; onOpen: (uid: string) => void; onBundle: (id: string) => void }) {
   const { ws } = useStudio()
   const rules = useRules()
   const sizes = useSizes(item.files)
@@ -59,6 +64,16 @@ export default function ItemEditor({ item }: { item: Item }) {
   const problems = useMemo(() => validateItem(item, view, sizes, undefined, rules), [item, view, sizes, rules])
   const key = keyOf(item)
   const general = problems.filter((p) => !p.at?.startsWith('layer:') && !p.at?.startsWith('file:'))
+  const { drafts } = useStudio()
+  // Tags in use, then every colour and theme known (from the shop, tag_labels and special tags) as color:/theme: tags.
+  const suggestions = useMemo(() => {
+    const pool = [...ws.items, ...Object.values(drafts)]
+    const facets = new Set<string>()
+    for (const code of themeLabels(ws).keys()) facets.add(`theme:${code}`)
+    for (const it of pool) { const s = shopOf(it); for (const t of s.allThemes) facets.add(`theme:${t}`); for (const c of s.allColors) facets.add(`color:${c}`) }
+    const used = allTags(pool).map(([t]) => t)
+    return [...used, ...[...facets].filter((f) => !used.includes(f)).sort()]
+  }, [ws, drafts])
 
   const head = (
     <>
@@ -68,7 +83,7 @@ export default function ItemEditor({ item }: { item: Item }) {
         <Field label="Name" hint="What Parley's pickers call it.">
           <input className="input" value={(item.entry.name as string) ?? ''} maxLength={MAX_NAME} onChange={(e) => patchEntry(item.uid, { name: e.target.value })} data-item-name />
         </Field>
-        <Field label={layered(item.kind) ? 'Folder name' : 'File name'} hint={`Letters, digits, '_' and '-'${layered(item.kind) ? '' : ', then its extension'}. Members who wear it store its id, so keep it once people use it.`}>
+        <Field label={layered(item.kind) ? 'Folder name' : 'File name'} hint={`${NAME_RULE[0].toUpperCase()}${NAME_RULE.slice(1)}${layered(item.kind) ? ' (no \'.\')' : ', then its extension'}. Members who wear it store its id, so keep it once people use it.`}>
           <input className="input font-mono" value={key} onChange={(e) => rename(item, e.target.value)} onBlur={(e) => rename(item, layered(item.kind) ? safeFolderName(e.target.value, rules.extraChars) : safeFileName(e.target.value, rules.extraChars))} data-item-key />
         </Field>
         <div className="sm:col-span-2">
@@ -76,6 +91,13 @@ export default function ItemEditor({ item }: { item: Item }) {
             <textarea className="input resize-y" rows={2} maxLength={MAX_DESCRIPTION} value={(item.entry.description as string) ?? ''} onChange={(e) => patchEntry(item.uid, { description: e.target.value })} data-item-description />
           </Field>
         </div>
+        <div className="sm:col-span-2">
+          <span className="label">Tags</span>
+          <TagInput value={tagsOf(item)} onChange={(tags) => patchEntry(item.uid, { tags: tags.length ? tags : undefined })} suggestions={suggestions} data-item-tags />
+          <div className="mt-1"><TagSuggestions key={item.uid} item={item} onAdd={(add) => patchEntry(item.uid, { tags: cleanTags([...tagsOf(item), ...add]) })} /></div>
+          <span className="mt-1 block text-xs text-text-2">For finding and grouping: search <span className="font-mono">#tag</span>, or pick tags in the sidebar. <span className="font-mono">color:blue</span> and <span className="font-mono">theme:holiday</span> also give it that colour or theme in Parley's Discover. Saved in metadata.json as <span className="font-mono">tags</span>.</span>
+        </div>
+        <div className="sm:col-span-2"><ShopInfo item={item} onOpen={onOpen} onBundle={onBundle} /></div>
       </div>
 
     </>
